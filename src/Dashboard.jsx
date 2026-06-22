@@ -1,6 +1,6 @@
 // ============================================================
-// campaign-dashboard v1.2 (2026-06-22)
-// 변경사항: 타이틀 선택 화면 추가 (Cat Shinobi / Fortress Saga), 타이틀별 룰 설정 페이지 추가
+// campaign-dashboard v1.5 (2026-06-22)
+// 변경사항: 예산 CSV 양식 다운로드 추가, 업로드 화면에서 "최근 지표 보기" 선택 가능하도록 변경
 // ============================================================
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import Papa from "papaparse";
@@ -11,7 +11,7 @@ import {
 import {
   Upload, AlertTriangle, TrendingUp, TrendingDown, Minus,
   CheckCircle2, Info, ChevronDown, ChevronUp,
-  DollarSign, Target, AlertOctagon, RefreshCw, Settings, ArrowLeft, Gamepad2,
+  DollarSign, Target, AlertOctagon, RefreshCw, Settings, ArrowLeft, Gamepad2, Download,
 } from "lucide-react";
 
 // ============================================================
@@ -255,14 +255,18 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
   const [syncStatus, setSyncStatus] = useState(null); // null | "saving" | "saved" | "error"
   const [lastSyncedAt, setLastSyncedAt] = useState(null);
 
-  // ---------- 타이틀 전환 시 또는 마운트 시 공유 저장소에서 복원 ----------
+  // 저장된 업로드 데이터를 "본 적은 알지만 아직 화면에 적용은 안 한" 상태로 보관
+  // -> 업로드 화면에서 "최근 지표 보기"를 눌러야 실제로 적용됨
+  const [savedUploadCache, setSavedUploadCache] = useState(null);
+
+  // ---------- 타이틀 전환 시 또는 마운트 시 공유 저장소에서 존재 여부만 확인 ----------
   useEffect(() => {
     let cancelled = false;
     setIsLoadingShared(true);
     // 타이틀이 바뀌면 이전 타이틀의 화면 상태를 깨끗이 비움 (데이터 혼선 방지)
     setRawRows(null); setHeaders([]); setMapping(null); setMappingConfirmed(false);
     setCampaignBudgets({}); setDecisionDateOverride(""); setFileName("");
-    setConfig(DEFAULT_CONFIG);
+    setConfig(DEFAULT_CONFIG); setSavedUploadCache(null);
 
     (async () => {
       const [savedBudgets, savedUpload, savedDecisionDate, savedConfig] = await Promise.all([
@@ -276,18 +280,25 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
       if (savedBudgets) setCampaignBudgets(savedBudgets);
       if (savedDecisionDate?.value) setDecisionDateOverride(savedDecisionDate.value);
       if (savedConfig) setConfig({ ...DEFAULT_CONFIG, ...savedConfig });
+      // 곧바로 화면에 적용하지 않고, "최근 지표 보기" 버튼을 위해 캐시만 보관
       if (savedUpload?.rawRows && savedUpload?.mapping) {
-        setHeaders(savedUpload.headers || []);
-        setMapping(savedUpload.mapping);
-        setRawRows(savedUpload.rawRows);
-        setFileName(savedUpload.fileName || "");
-        setMappingConfirmed(true);
+        setSavedUploadCache(savedUpload);
         setLastSyncedAt(savedUpload.uploadedAt || null);
       }
       setIsLoadingShared(false);
     })();
     return () => { cancelled = true; };
   }, [title.id, keys]);
+
+  // ---------- "최근 지표 보기" 클릭 시, 캐시된 업로드 데이터를 화면에 적용 ----------
+  const handleViewRecent = useCallback(() => {
+    if (!savedUploadCache) return;
+    setHeaders(savedUploadCache.headers || []);
+    setMapping(savedUploadCache.mapping);
+    setRawRows(savedUploadCache.rawRows);
+    setFileName(savedUploadCache.fileName || "");
+    setMappingConfirmed(true);
+  }, [savedUploadCache]);
 
   // ---------- 예산 변경 시 자동 저장 (디바운스) ----------
   const debouncedSaveBudgets = useMemo(
@@ -362,17 +373,21 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
   const handleConfirmMapping = useCallback(async () => {
     setMappingConfirmed(true);
     setSyncStatus("saving");
+    const uploadedAt = new Date().toISOString();
     const ok = await saveToStorage(keys.upload, {
-      fileName, headers, mapping, rawRows,
-      uploadedAt: new Date().toISOString(),
+      fileName, headers, mapping, rawRows, uploadedAt,
     });
     setSyncStatus(ok ? "saved" : "error");
-    if (ok) setLastSyncedAt(new Date().toISOString());
+    if (ok) {
+      setLastSyncedAt(uploadedAt);
+      setSavedUploadCache({ fileName, headers, mapping, rawRows, uploadedAt });
+    }
   }, [fileName, headers, mapping, rawRows, keys]);
 
   // ---------- 새 파일 업로드(리셋) ----------
   const handleResetFile = useCallback(async () => {
     setRawRows(null); setMapping(null); setMappingConfirmed(false); setHeaders([]);
+    setSavedUploadCache(null);
     await deleteFromStorage(keys.upload);
   }, [keys]);
 
@@ -381,7 +396,7 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
     const confirmed = window.confirm(`${title.name}의 팀 전체 공유 데이터(업로드 파일 + 입력한 모든 예산)가 삭제됩니다. 계속할까요?`);
     if (!confirmed) return;
     setRawRows(null); setMapping(null); setMappingConfirmed(false); setHeaders([]);
-    setCampaignBudgets({});
+    setCampaignBudgets({}); setSavedUploadCache(null);
     await Promise.all([
       deleteFromStorage(keys.upload),
       deleteFromStorage(keys.budgets),
@@ -571,7 +586,7 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
 
     const eligibleCampaigns = campaignList.filter((c) => avgDailyCost[c] > config.minCampaignCostForPool);
 
-    // 캠페인별 ma7, ma14 (markDate7 시점)
+    // 캠페인별 ma7, ma14 (markDate7 시점 값 + 전체 시계열 둘 다 보존)
     const campaignMa = {};
     eligibleCampaigns.forEach((c) => {
       const dates = dateInfo.allDates;
@@ -588,10 +603,11 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
         ma7: ma7map[markDate7],
         ma14: ma14map[markDate14],
         hasData: ma7map[markDate7] != null,
+        ma7map, ma14map,
       };
     });
 
-    // 유료 전체 평균(기준선) - markDate7 시점, eligible 캠페인들의 7일 이동평균 cost/rev 총합 기반
+    // 유료 전체 평균(기준선) - markDate7 시점 값 + 전체 시계열 둘 다 보존
     const paidTotalSeries = {};
     dateInfo.allDates.forEach((d) => {
       let cost = 0, rev = 0;
@@ -613,11 +629,23 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
         const group = benchmark != null ? (ma7 >= benchmark ? "above" : "below") : null;
         const gap = benchmark != null ? ma7 - benchmark : null;
         const terminationFlag = ma14 != null && ma14 <= config.terminationThreshold;
+
+        // 캠페인별 트렌드 차트용 시계열 (날짜, 7일MA, 14일MA, 그날의 기준선)
+        const chartData = dateInfo.allDates
+          .filter((d) => campaignMa[c].ma7map[d] != null || campaignMa[c].ma14map[d] != null)
+          .map((d) => ({
+            date: d.slice(5),
+            ma7: campaignMa[c].ma7map[d],
+            ma14: campaignMa[c].ma14map[d],
+            benchmark: paidTotalMa7[d],
+          }));
+
         return {
           name: c,
           ma7, ma14, group, gap, terminationFlag,
           currentBudget: parseFloat(campaignBudgets[c]) || 0,
           avgDailyCost: avgDailyCost[c],
+          chartData,
         };
       });
 
@@ -764,7 +792,8 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
         )}
 
         {!isLoadingShared && !parsedData && (
-          <UploadZone onDrop={onDrop} onFile={handleFile} parseError={parseError} />
+          <UploadZone onDrop={onDrop} onFile={handleFile} parseError={parseError}
+            savedUploadCache={savedUploadCache} onViewRecent={handleViewRecent} />
         )}
 
         {rawRows && mapping && !mappingConfirmed && (
@@ -900,43 +929,69 @@ function Header({ title, onBack, onOpenSettings, fileName, parsedData, dateInfo,
   );
 }
 
-function UploadZone({ onDrop, onFile, parseError }) {
+function UploadZone({ onDrop, onFile, parseError, savedUploadCache, onViewRecent }) {
   const [isDragOver, setIsDragOver] = useState(false);
   return (
-    <div
-      onDrop={(e) => { onDrop(e); setIsDragOver(false); }}
-      onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
-      onDragLeave={() => setIsDragOver(false)}
-      style={{
-        marginTop: 40,
-        border: `2px dashed ${isDragOver ? "#5B8DEF" : "#2A2E38"}`,
-        borderRadius: 12,
-        padding: "64px 32px",
-        textAlign: "center",
-        background: isDragOver ? "#161A22" : "#13151A",
-        transition: "all 0.15s",
-      }}
-    >
-      <Upload size={32} color="#5B8DEF" style={{ marginBottom: 16 }} />
-      <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>
-        CSV 파일을 끌어다 놓거나 선택하세요
-      </div>
-      <div style={{ fontSize: 13, color: "#6B7280", marginBottom: 24, lineHeight: 1.6 }}>
-        AppsFlyer 등에서 추출한 날짜·캠페인별 성과 CSV (형식은 자유, 업로드 후 컬럼을 매칭합니다)
-      </div>
-      <label style={{
-        display: "inline-block", background: "#5B8DEF", color: "#fff", padding: "10px 24px",
-        borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer",
-      }}>
-        파일 선택
-        <input type="file" accept=".csv" style={{ display: "none" }}
-          onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])} />
-      </label>
-      {parseError && (
-        <div style={{ marginTop: 20, color: "#E5894A", fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
-          <AlertTriangle size={14} /> {parseError}
+    <div style={{ marginTop: 40 }}>
+      {savedUploadCache && (
+        <div style={{
+          background: "#13151A", border: "1px solid #2A2E38", borderRadius: 12,
+          padding: "20px 24px", marginBottom: 16,
+          display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 14,
+        }}>
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4, display: "flex", alignItems: "center", gap: 7 }}>
+              <CheckCircle2 size={15} color="#3D8B5F" /> 최근 확인한 데이터가 있습니다
+            </div>
+            <div style={{ fontSize: 12.5, color: "#6B7280" }}>
+              {savedUploadCache.fileName}
+              {savedUploadCache.uploadedAt && (
+                <> · {new Date(savedUploadCache.uploadedAt).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })} 업로드</>
+              )}
+            </div>
+          </div>
+          <button onClick={onViewRecent} style={{
+            background: "#5B8DEF", color: "#fff", border: "none", borderRadius: 8,
+            padding: "10px 20px", fontSize: 13.5, fontWeight: 600, cursor: "pointer", flexShrink: 0,
+          }}>
+            최근 지표 보기
+          </button>
         </div>
       )}
+      <div
+        onDrop={(e) => { onDrop(e); setIsDragOver(false); }}
+        onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
+        onDragLeave={() => setIsDragOver(false)}
+        style={{
+          border: `2px dashed ${isDragOver ? "#5B8DEF" : "#2A2E38"}`,
+          borderRadius: 12,
+          padding: "64px 32px",
+          textAlign: "center",
+          background: isDragOver ? "#161A22" : "#13151A",
+          transition: "all 0.15s",
+        }}
+      >
+        <Upload size={32} color="#5B8DEF" style={{ marginBottom: 16 }} />
+        <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>
+          {savedUploadCache ? "새 CSV 파일을 끌어다 놓거나 선택하세요" : "CSV 파일을 끌어다 놓거나 선택하세요"}
+        </div>
+        <div style={{ fontSize: 13, color: "#6B7280", marginBottom: 24, lineHeight: 1.6 }}>
+          AppsFlyer 등에서 추출한 날짜·캠페인별 성과 CSV (형식은 자유, 업로드 후 컬럼을 매칭합니다)
+        </div>
+        <label style={{
+          display: "inline-block", background: "#5B8DEF", color: "#fff", padding: "10px 24px",
+          borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer",
+        }}>
+          파일 선택
+          <input type="file" accept=".csv" style={{ display: "none" }}
+            onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])} />
+        </label>
+        {parseError && (
+          <div style={{ marginTop: 20, color: "#E5894A", fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+            <AlertTriangle size={14} /> {parseError}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -1007,6 +1062,85 @@ function ColumnMappingPanel({ headers, mapping, setMapping, onConfirm, sampleRow
 
 function BudgetInputPanel({ campaignList, campaignBudgets, setCampaignBudgets, currentTotalBudget }) {
   const [open, setOpen] = useState(true);
+  const [csvPreview, setCsvPreview] = useState(null); // { matched: [{name, budget}], unmatched: [name] }
+  const [csvError, setCsvError] = useState(null);
+
+  const handleBudgetCsv = useCallback((file) => {
+    setCsvError(null);
+    setCsvPreview(null);
+    Papa.parse(file, {
+      header: true,
+      skipEmptyLines: true,
+      complete: (results) => {
+        if (!results.data || results.data.length === 0) {
+          setCsvError("파일에서 데이터를 읽을 수 없습니다.");
+          return;
+        }
+        const fields = results.meta.fields || [];
+        const campaignCol = fields.find((f) => /^campaign/i.test(f) || /캠페인/.test(f)) || fields[0];
+        const budgetCol = fields.find((f) => /^budget/i.test(f) || /예산/.test(f) || /^cost/i.test(f)) || fields[1];
+        if (!campaignCol || !budgetCol) {
+          setCsvError("캠페인명/예산 컬럼을 찾을 수 없습니다. 헤더가 'campaign, budget' 형태인지 확인해주세요.");
+          return;
+        }
+
+        // 캠페인명 매칭: 정확 일치 우선, 안 되면 공백 제거+소문자 비교로 재시도
+        const normalize = (s) => String(s || "").trim().toLowerCase();
+        const campaignMap = new Map(campaignList.map((c) => [normalize(c), c]));
+
+        const matched = [];
+        const unmatched = [];
+        const seen = new Set();
+
+        results.data.forEach((row) => {
+          const rawName = row[campaignCol];
+          const rawBudget = row[budgetCol];
+          if (!rawName) return;
+          const budgetNum = parseFloat(String(rawBudget).replace(/[^0-9.-]/g, ""));
+          const actualName = campaignMap.get(normalize(rawName));
+          if (actualName) {
+            matched.push({ name: actualName, budget: isNaN(budgetNum) ? 0 : budgetNum });
+            seen.add(actualName);
+          } else {
+            unmatched.push(rawName);
+          }
+        });
+
+        const notInCsv = campaignList.filter((c) => !seen.has(c));
+        setCsvPreview({ matched, unmatched, notInCsv });
+      },
+      error: (err) => setCsvError(`파일 읽기 오류: ${err.message}`),
+    });
+  }, [campaignList]);
+
+  const applyCsvBudgets = () => {
+    if (!csvPreview) return;
+    setCampaignBudgets((b) => {
+      const next = { ...b };
+      csvPreview.matched.forEach(({ name, budget }) => { next[name] = String(budget); });
+      return next;
+    });
+    setCsvPreview(null);
+  };
+
+  // 양식 다운로드: 현재 캠페인 목록 + (있으면) 현재 적용된 예산을 채워서 CSV 생성
+  const downloadBudgetTemplate = useCallback(() => {
+    const rows = campaignList.map((c) => ({
+      campaign: c,
+      budget: campaignBudgets[c] ?? "",
+    }));
+    const csv = Papa.unparse(rows, { columns: ["campaign", "budget"] });
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `campaign-budgets_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [campaignList, campaignBudgets]);
+
   return (
     <SectionCard
       title="현재 운영 예산 입력"
@@ -1016,6 +1150,79 @@ function BudgetInputPanel({ campaignList, campaignBudgets, setCampaignBudgets, c
       onToggle={() => setOpen((o) => !o)}
       rightContent={<span className="mono" style={{ fontSize: 14, fontWeight: 700 }}>합계 {fmtMoney(currentTotalBudget)}</span>}
     >
+      <div style={{
+        display: "flex", alignItems: "center", gap: 12, marginBottom: 16,
+        background: "#161A22", border: "1px dashed #2A2E38", borderRadius: 8, padding: "12px 14px",
+      }}>
+        <Upload size={16} color="#5B8DEF" style={{ flexShrink: 0 }} />
+        <div style={{ flex: 1, fontSize: 12.5, color: "#9499A6" }}>
+          예산을 CSV로 한 번에 올리고 싶으면, <span className="mono" style={{ color: "#C5C8D1" }}>campaign, budget</span> 두 컬럼짜리 파일을 올려주세요.
+        </div>
+        <button onClick={downloadBudgetTemplate} style={{
+          background: "transparent", border: "1px solid #2A2E38", borderRadius: 6, padding: "7px 14px",
+          fontSize: 12.5, color: "#9499A6", cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center", gap: 6,
+        }}>
+          <Download size={13} /> 양식 다운로드
+        </button>
+        <label style={{
+          background: "#1A1D24", border: "1px solid #2A2E38", borderRadius: 6, padding: "7px 14px",
+          fontSize: 12.5, color: "#C5C8D1", cursor: "pointer", flexShrink: 0,
+        }}>
+          CSV 선택
+          <input type="file" accept=".csv" style={{ display: "none" }}
+            onChange={(e) => e.target.files?.[0] && handleBudgetCsv(e.target.files[0])} />
+        </label>
+      </div>
+
+      {csvError && (
+        <div style={{ color: "#E5894A", fontSize: 12.5, marginBottom: 14, display: "flex", gap: 6, alignItems: "center" }}>
+          <AlertTriangle size={13} /> {csvError}
+        </div>
+      )}
+
+      {csvPreview && (
+        <div style={{ background: "#161A22", border: "1px solid #2A2E38", borderRadius: 8, padding: 14, marginBottom: 16 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
+            <CheckCircle2 size={14} color="#1E7B45" /> {csvPreview.matched.length}개 캠페인 매칭됨
+          </div>
+          <div style={{ maxHeight: 160, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4, marginBottom: 12 }}>
+            {csvPreview.matched.map((m) => (
+              <div key={m.name} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#C5C8D1" }}>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 320 }}>{m.name}</span>
+                <span className="mono">{fmtMoney(m.budget)}</span>
+              </div>
+            ))}
+          </div>
+          {csvPreview.unmatched.length > 0 && (
+            <div style={{ fontSize: 12, color: "#C9622B", marginBottom: 6 }}>
+              <AlertTriangle size={12} style={{ marginRight: 4, verticalAlign: -1 }} />
+              CSV에 있지만 현재 캠페인 목록에 없는 이름 ({csvPreview.unmatched.length}개): {csvPreview.unmatched.join(", ")}
+            </div>
+          )}
+          {csvPreview.notInCsv.length > 0 && (
+            <div style={{ fontSize: 12, color: "#6B7280", marginBottom: 10 }}>
+              CSV에 없어서 기존 값이 유지되는 캠페인 ({csvPreview.notInCsv.length}개): {csvPreview.notInCsv.join(", ")}
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={applyCsvBudgets} disabled={csvPreview.matched.length === 0} style={{
+              background: csvPreview.matched.length === 0 ? "#2A2E38" : "#5B8DEF",
+              color: csvPreview.matched.length === 0 ? "#5D6270" : "#fff",
+              border: "none", borderRadius: 7, padding: "8px 16px", fontSize: 13, fontWeight: 600,
+              cursor: csvPreview.matched.length === 0 ? "not-allowed" : "pointer",
+            }}>
+              {csvPreview.matched.length}개 예산 적용
+            </button>
+            <button onClick={() => setCsvPreview(null)} style={{
+              background: "transparent", border: "1px solid #2A2E38", color: "#9499A6",
+              borderRadius: 7, padding: "8px 14px", fontSize: 13, cursor: "pointer",
+            }}>
+              취소
+            </button>
+          </div>
+        </div>
+      )}
+
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 10 }}>
         {campaignList.map((c) => (
           <div key={c} style={{ display: "flex", alignItems: "center", gap: 8, background: "#161A22", borderRadius: 8, padding: "8px 10px" }}>
@@ -1134,6 +1341,7 @@ function Rule1Panel({ rule1Result, rule1Budget, currentTotalBudget, blendedAnaly
 
 function Rule2Panel({ campaignAnalysis, rule2Allocation, rule1Result, config }) {
   const [open, setOpen] = useState(true);
+  const [expandedCampaign, setExpandedCampaign] = useState(null);
   if (!campaignAnalysis) return null;
   const { campaigns, benchmark, excludedCampaigns } = campaignAnalysis;
   const sorted = [...campaigns].sort((a, b) => (b.gap ?? -Infinity) - (a.gap ?? -Infinity));
@@ -1141,7 +1349,7 @@ function Rule2Panel({ campaignAnalysis, rule2Allocation, rule1Result, config }) 
   return (
     <SectionCard
       title="2. 캠페인 배분 룰"
-      subtitle={benchmark != null ? `유료 전체 평균(기준선) ${fmtPct(benchmark)}` : ""}
+      subtitle={benchmark != null ? `유료 전체 평균(기준선) ${fmtPct(benchmark)} · 캠페인명을 클릭하면 추이를 볼 수 있습니다` : ""}
       icon={<Target size={16} color="#5B8DEF" />}
       open={open} onToggle={() => setOpen((o) => !o)}
     >
@@ -1171,30 +1379,51 @@ function Rule2Panel({ campaignAnalysis, rule2Allocation, rule1Result, config }) 
           <tbody>
             {sorted.map((c) => {
               const alloc = rule2Allocation?.perCampaign?.[c.name];
+              const isExpanded = expandedCampaign === c.name;
               return (
-                <tr key={c.name} style={{ borderTop: "1px solid #1E2128" }}>
-                  <td style={{ padding: "10px 10px 10px 0", maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis" }} title={c.name}>
-                    {c.terminationFlag && <AlertOctagon size={13} color="#A4262C" style={{ marginRight: 5, verticalAlign: -2 }} />}
-                    {c.name}
-                  </td>
-                  <td style={{ padding: "10px" }} className="mono">{fmtPct(c.ma7)}</td>
-                  <td style={{ padding: "10px" }} className="mono">
-                    <span style={{ color: c.terminationFlag ? "#A4262C" : "inherit", fontWeight: c.terminationFlag ? 700 : 400 }}>
-                      {c.ma14 != null ? fmtPct(c.ma14) : "N/A"}
-                    </span>
-                  </td>
-                  <td style={{ padding: "10px" }}>
-                    <Badge color={c.group === "above" ? "#1E7B45" : "#A4262C"} text={c.group === "above" ? "상위" : "하위"} />
-                  </td>
-                  <td style={{ padding: "10px" }} className="mono">{fmtPp(c.gap)}</td>
-                  <td style={{ padding: "10px" }} className="mono">{fmtMoney(c.currentBudget)}</td>
-                  <td style={{ padding: "10px" }} className="mono">
-                    <span style={{ color: alloc?.allocated > 0 ? "#1E7B45" : alloc?.allocated < 0 ? "#A4262C" : "#5D6270" }}>
-                      {alloc?.allocated ? fmtMoneySigned(alloc.allocated) : "-"}
-                    </span>
-                  </td>
-                  <td style={{ padding: "10px", fontWeight: 700 }} className="mono">{fmtMoney(alloc?.newBudget ?? c.currentBudget)}</td>
-                </tr>
+                <React.Fragment key={c.name}>
+                  <tr style={{ borderTop: "1px solid #1E2128" }}>
+                    <td style={{ padding: "10px 10px 10px 0", maxWidth: 220 }}>
+                      <button
+                        onClick={() => setExpandedCampaign(isExpanded ? null : c.name)}
+                        style={{
+                          background: "transparent", border: "none", padding: 0, cursor: "pointer",
+                          color: isExpanded ? "#5B8DEF" : "#E8E9ED", fontSize: 13, textAlign: "left",
+                          display: "flex", alignItems: "center", gap: 5, width: "100%",
+                        }}
+                        title={c.name}
+                      >
+                        {isExpanded ? <ChevronUp size={12} style={{ flexShrink: 0, color: "#5B8DEF" }} /> : <ChevronDown size={12} style={{ flexShrink: 0, color: "#5D6270" }} />}
+                        {c.terminationFlag && <AlertOctagon size={13} color="#A4262C" style={{ flexShrink: 0 }} />}
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</span>
+                      </button>
+                    </td>
+                    <td style={{ padding: "10px" }} className="mono">{fmtPct(c.ma7)}</td>
+                    <td style={{ padding: "10px" }} className="mono">
+                      <span style={{ color: c.terminationFlag ? "#A4262C" : "inherit", fontWeight: c.terminationFlag ? 700 : 400 }}>
+                        {c.ma14 != null ? fmtPct(c.ma14) : "N/A"}
+                      </span>
+                    </td>
+                    <td style={{ padding: "10px" }}>
+                      <Badge color={c.group === "above" ? "#1E7B45" : "#A4262C"} text={c.group === "above" ? "상위" : "하위"} />
+                    </td>
+                    <td style={{ padding: "10px" }} className="mono">{fmtPp(c.gap)}</td>
+                    <td style={{ padding: "10px" }} className="mono">{fmtMoney(c.currentBudget)}</td>
+                    <td style={{ padding: "10px" }} className="mono">
+                      <span style={{ color: alloc?.allocated > 0 ? "#1E7B45" : alloc?.allocated < 0 ? "#A4262C" : "#5D6270" }}>
+                        {alloc?.allocated ? fmtMoneySigned(alloc.allocated) : "-"}
+                      </span>
+                    </td>
+                    <td style={{ padding: "10px", fontWeight: 700 }} className="mono">{fmtMoney(alloc?.newBudget ?? c.currentBudget)}</td>
+                  </tr>
+                  {isExpanded && (
+                    <tr>
+                      <td colSpan={8} style={{ padding: "4px 0 18px 0", background: "#0F1115" }}>
+                        <CampaignTrendChart campaign={c} config={config} />
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
               );
             })}
           </tbody>
@@ -1207,6 +1436,54 @@ function Rule2Panel({ campaignAnalysis, rule2Allocation, rule1Result, config }) 
         </div>
       )}
     </SectionCard>
+  );
+}
+
+// 캠페인명 클릭 시 펼쳐지는 D7/D14 ROAS 추이 차트
+function CampaignTrendChart({ campaign, config }) {
+  if (!campaign.chartData || campaign.chartData.length < 2) {
+    return <EmptyNote text="추이를 그릴 데이터가 충분하지 않습니다 (최소 며칠치 이동평균 데이터 필요)." />;
+  }
+  const hasD14 = campaign.chartData.some((d) => d.ma14 != null);
+  return (
+    <div style={{ padding: "10px 0 0 0" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 10, fontSize: 11.5, flexWrap: "wrap" }}>
+        <span style={{ color: "#C5C8D1", fontWeight: 600 }}>{campaign.name}</span>
+        <LegendDot color="#5B8DEF" label="7일 이동평균 ROAS" />
+        {hasD14 && <LegendDot color="#E5894A" label="14일 이동평균 ROAS" dashed />}
+        <LegendDot color="#5D6270" label="유료 전체 평균(기준선)" dashed />
+      </div>
+      <div style={{ height: 200 }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={campaign.chartData} margin={{ top: 6, right: 12, bottom: 0, left: -10 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#1E2128" vertical={false} />
+            <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#6B7280" }} axisLine={{ stroke: "#1E2128" }} tickLine={false} />
+            <YAxis
+              tick={{ fontSize: 10, fill: "#6B7280" }} axisLine={false} tickLine={false}
+              tickFormatter={(v) => `${Math.round(v * 100)}%`}
+              width={40}
+            />
+            <Tooltip
+              contentStyle={{ background: "#1A1D24", border: "1px solid #2A2E38", borderRadius: 8, fontSize: 12 }}
+              labelStyle={{ color: "#9499A6" }}
+              formatter={(v, name) => [v == null ? "-" : `${(v * 100).toFixed(1)}%`, name]}
+            />
+            <Line type="monotone" dataKey="benchmark" name="기준선" stroke="#5D6270" strokeWidth={1.3} strokeDasharray="4 3" dot={false} />
+            {hasD14 && <Line type="monotone" dataKey="ma14" name="14일MA" stroke="#E5894A" strokeWidth={1.6} strokeDasharray="4 3" dot={false} connectNulls />}
+            <Line type="monotone" dataKey="ma7" name="7일MA" stroke="#5B8DEF" strokeWidth={2.2} dot={false} connectNulls />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+
+function LegendDot({ color, label, dashed }) {
+  return (
+    <span style={{ display: "flex", alignItems: "center", gap: 5, color: "#9499A6" }}>
+      <span style={{ width: 12, height: 0, borderTop: `1.5px ${dashed ? "dashed" : "solid"} ${color}`, display: "inline-block" }} />
+      {label}
+    </span>
   );
 }
 
