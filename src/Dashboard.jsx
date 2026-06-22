@@ -1,43 +1,72 @@
 // ============================================================
-// campaign-dashboard v1.1 (2026-06-22)
-// 변경사항: 전체예산 룰 차트에 마지노선(판단 기준 데이터) 표기 추가
+// campaign-dashboard v1.2 (2026-06-22)
+// 변경사항: 타이틀 선택 화면 추가 (Cat Shinobi / Fortress Saga), 타이틀별 룰 설정 페이지 추가
 // ============================================================
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import Papa from "papaparse";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, ReferenceLine,
+  ResponsiveContainer, ReferenceLine, Legend,
 } from "recharts";
 import {
   Upload, AlertTriangle, TrendingUp, TrendingDown, Minus,
   CheckCircle2, Info, ChevronDown, ChevronUp,
-  DollarSign, Target, AlertOctagon, RefreshCw,
+  DollarSign, Target, AlertOctagon, RefreshCw, Settings, ArrowLeft, Gamepad2,
 } from "lucide-react";
 
-const IAP_RATE = 0.7;
-const AD_RATE = 1.0;
-const TARGET_ROAS = 0.40;
-const BUDGET_ROUND_UNIT = 50;
-const MIN_CAMPAIGN_COST_FOR_POOL = 50;
-const TERMINATION_THRESHOLD = 0.10;
-
-const ZONES = [
-  { key: "big_over", label: "큰 초과", min: 0.44, max: Infinity, rate: 0.15, color: "#1E7B45" },
-  { key: "mid_over", label: "소폭 초과", min: 0.40, max: 0.44, rateFn: (v) => 0.05 + ((v - 0.40) / 0.04) * 0.05, color: "#2E9E5B" },
-  { key: "ok", label: "적정", min: 0.36, max: 0.40, rate: 0, color: "#B7791F" },
-  { key: "mid_under", label: "중간 미달", min: 0.30, max: 0.36, rate: -0.10, color: "#C9622B" },
-  { key: "big_under", label: "심각 미달", min: -Infinity, max: 0.30, rate: -0.20, color: "#A4262C" },
+// ============================================================
+// 타이틀 정의
+// ============================================================
+const TITLES = [
+  { id: "cat-shinobi", name: "Cat Shinobi", subtitle: "" },
+  { id: "fortress-saga", name: "Fortress Saga", subtitle: "" },
 ];
 
-function getZone(roas) {
+// ============================================================
+// 기본 룰 설정값 (모든 타이틀의 출발점이 되는 기본값)
+// 타이틀별로 다르게 가고 싶으면, 대시보드 안 "룰 설정" 페이지에서 override 가능.
+// override 값이 없으면 항상 이 기본값을 그대로 사용한다.
+// ============================================================
+const DEFAULT_CONFIG = {
+  iapRate: 0.7,
+  adRate: 1.0,
+  targetRoas: 0.40,
+  budgetRoundUnit: 50,
+  minCampaignCostForPool: 50,
+  terminationThreshold: 0.10,
+  zones: [
+    { key: "big_over", label: "큰 초과", min: 0.44, max: null, rate: 0.15 },
+    { key: "mid_over", label: "소폭 초과", min: 0.40, max: 0.44, rateMin: 0.05, rateMax: 0.10 },
+    { key: "ok", label: "적정", min: 0.36, max: 0.40, rate: 0 },
+    { key: "mid_under", label: "중간 미달", min: 0.30, max: 0.36, rate: -0.10 },
+    { key: "big_under", label: "심각 미달", min: null, max: 0.30, rate: -0.20 },
+  ],
+};
+
+const ZONE_COLORS = {
+  big_over: "#1E7B45", mid_over: "#2E9E5B", ok: "#B7791F", mid_under: "#C9622B", big_under: "#A4262C",
+};
+
+function buildZonesWithFn(zones) {
+  return zones.map((z) => ({
+    ...z,
+    min: z.min == null ? -Infinity : z.min,
+    max: z.max == null ? Infinity : z.max,
+    color: ZONE_COLORS[z.key] || "#9499A6",
+    rateFn: z.rateMin != null ? (v) => z.rateMin + ((v - z.min) / (z.max - z.min)) * (z.rateMax - z.rateMin) : undefined,
+  }));
+}
+
+function getZone(roas, config) {
   if (roas == null || isNaN(roas)) return null;
-  for (const z of ZONES) {
+  const zones = buildZonesWithFn(config.zones);
+  for (const z of zones) {
     if (roas >= z.min && roas < z.max) {
       const rate = z.rateFn ? z.rateFn(roas) : z.rate;
       return { ...z, rate };
     }
   }
-  return ZONES[ZONES.length - 1];
+  return zones[zones.length - 1];
 }
 
 function stabilityMultiplier(deltaPp) {
@@ -51,7 +80,6 @@ function stabilityMultiplier(deltaPp) {
 function roundToUnit(amount, unit) {
   return Math.round(amount / unit) * unit;
 }
-
 function fmtPct(v, digits = 1) {
   if (v == null || isNaN(v)) return "-";
   return `${(v * 100).toFixed(digits)}%`;
@@ -71,6 +99,9 @@ function fmtMoneySigned(v) {
   return `${s}$${Math.round(v).toLocaleString()}`;
 }
 
+// ============================================================
+// CSV 컬럼 자동 매핑
+// ============================================================
 const COLUMN_PATTERNS = {
   date: [/^date$/i, /날짜/, /^day$/i],
   campaign: [/^campaign/i, /캠페인/],
@@ -107,6 +138,9 @@ const FIELD_LABELS = {
 };
 const REQUIRED_FIELDS = ["date", "campaign", "cost", "iap_d7", "adview_d7"];
 
+// ============================================================
+// 이동평균 유틸
+// ============================================================
 function buildDateRange(minDate, maxDate) {
   const dates = [];
   let cur = new Date(minDate);
@@ -119,6 +153,7 @@ function buildDateRange(minDate, maxDate) {
 }
 
 function rollingMean(seriesMap, dateKeys, windowSize) {
+  // seriesMap: { dateStr: value|null }, returns { dateStr: maValue|null }
   const result = {};
   const values = dateKeys.map((d) => seriesMap[d]);
   for (let i = 0; i < dateKeys.length; i++) {
@@ -143,14 +178,20 @@ function addDays(dateStr, n) {
 }
 
 function getWeekday(dateStr) {
-  return new Date(dateStr).getDay();
+  return new Date(dateStr).getDay(); // 0=Sun, 1=Mon, 4=Thu
 }
 
-const STORAGE_KEYS = {
-  budgets: "dashboard:campaign-budgets",
-  upload: "dashboard:last-upload",
-  decisionDate: "dashboard:decision-date",
-};
+// ============================================================
+// 공유 저장소 키 — 타이틀별로 분리됨
+// ============================================================
+function storageKeys(titleId) {
+  return {
+    budgets: `dashboard:${titleId}:campaign-budgets`,
+    upload: `dashboard:${titleId}:last-upload`,
+    decisionDate: `dashboard:${titleId}:decision-date`,
+    ruleConfig: `dashboard:${titleId}:rule-config`,
+  };
+}
 
 async function loadFromStorage(key) {
   try {
@@ -159,7 +200,7 @@ async function loadFromStorage(key) {
     const data = await res.json();
     return data.value ? JSON.parse(data.value) : null;
   } catch (e) {
-    return null;
+    return null; // 키가 없거나 오류 -> 그냥 빈 상태로 시작
   }
 }
 
@@ -193,7 +234,12 @@ function debounce(fn, ms) {
   };
 }
 
-export default function Dashboard() {
+// ============================================================
+// 메인 컴포넌트
+// ============================================================
+function DashboardForTitle({ title, onBack, onOpenSettings }) {
+  const keys = useMemo(() => storageKeys(title.id), [title.id]);
+
   const [rawRows, setRawRows] = useState(null);
   const [headers, setHeaders] = useState([]);
   const [mapping, setMapping] = useState(null);
@@ -203,23 +249,33 @@ export default function Dashboard() {
   const [campaignBudgets, setCampaignBudgets] = useState({});
   const [decisionDateOverride, setDecisionDateOverride] = useState("");
   const [expandedSections, setExpandedSections] = useState({ insights: true });
+  const [config, setConfig] = useState(DEFAULT_CONFIG);
 
   const [isLoadingShared, setIsLoadingShared] = useState(true);
-  const [syncStatus, setSyncStatus] = useState(null);
+  const [syncStatus, setSyncStatus] = useState(null); // null | "saving" | "saved" | "error"
   const [lastSyncedAt, setLastSyncedAt] = useState(null);
 
+  // ---------- 타이틀 전환 시 또는 마운트 시 공유 저장소에서 복원 ----------
   useEffect(() => {
     let cancelled = false;
+    setIsLoadingShared(true);
+    // 타이틀이 바뀌면 이전 타이틀의 화면 상태를 깨끗이 비움 (데이터 혼선 방지)
+    setRawRows(null); setHeaders([]); setMapping(null); setMappingConfirmed(false);
+    setCampaignBudgets({}); setDecisionDateOverride(""); setFileName("");
+    setConfig(DEFAULT_CONFIG);
+
     (async () => {
-      const [savedBudgets, savedUpload, savedDecisionDate] = await Promise.all([
-        loadFromStorage(STORAGE_KEYS.budgets),
-        loadFromStorage(STORAGE_KEYS.upload),
-        loadFromStorage(STORAGE_KEYS.decisionDate),
+      const [savedBudgets, savedUpload, savedDecisionDate, savedConfig] = await Promise.all([
+        loadFromStorage(keys.budgets),
+        loadFromStorage(keys.upload),
+        loadFromStorage(keys.decisionDate),
+        loadFromStorage(keys.ruleConfig),
       ]);
       if (cancelled) return;
 
       if (savedBudgets) setCampaignBudgets(savedBudgets);
       if (savedDecisionDate?.value) setDecisionDateOverride(savedDecisionDate.value);
+      if (savedConfig) setConfig({ ...DEFAULT_CONFIG, ...savedConfig });
       if (savedUpload?.rawRows && savedUpload?.mapping) {
         setHeaders(savedUpload.headers || []);
         setMapping(savedUpload.mapping);
@@ -231,30 +287,47 @@ export default function Dashboard() {
       setIsLoadingShared(false);
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [title.id, keys]);
 
+  // ---------- 예산 변경 시 자동 저장 (디바운스) ----------
   const debouncedSaveBudgets = useMemo(
     () => debounce(async (budgets) => {
       setSyncStatus("saving");
-      const ok = await saveToStorage(STORAGE_KEYS.budgets, budgets);
+      const ok = await saveToStorage(keys.budgets, budgets);
       setSyncStatus(ok ? "saved" : "error");
       if (ok) setLastSyncedAt(new Date().toISOString());
     }, 600),
-    []
+    [keys]
   );
 
   useEffect(() => {
-    if (isLoadingShared) return;
+    if (isLoadingShared) return; // 초기 복원 중에는 저장 안 함 (불필요한 덮어쓰기 방지)
     if (Object.keys(campaignBudgets).length === 0) return;
     debouncedSaveBudgets(campaignBudgets);
   }, [campaignBudgets, isLoadingShared, debouncedSaveBudgets]);
 
+  // ---------- 판단일 override 변경 시 저장 ----------
   useEffect(() => {
     if (isLoadingShared) return;
     if (!decisionDateOverride) return;
-    saveToStorage(STORAGE_KEYS.decisionDate, { value: decisionDateOverride });
-  }, [decisionDateOverride, isLoadingShared]);
+    saveToStorage(keys.decisionDate, { value: decisionDateOverride });
+  }, [decisionDateOverride, isLoadingShared, keys]);
 
+  // ---------- 룰 설정 변경 시 저장 (설정 페이지에서 호출) ----------
+  const handleSaveConfig = useCallback(async (newConfig) => {
+    setConfig(newConfig);
+    setSyncStatus("saving");
+    const ok = await saveToStorage(keys.ruleConfig, newConfig);
+    setSyncStatus(ok ? "saved" : "error");
+    if (ok) setLastSyncedAt(new Date().toISOString());
+  }, [keys]);
+
+  const handleResetConfig = useCallback(async () => {
+    setConfig(DEFAULT_CONFIG);
+    await deleteFromStorage(keys.ruleConfig);
+  }, [keys]);
+
+  // ---------- 파일 업로드 ----------
   const handleFile = useCallback((file) => {
     setParseError(null);
     setFileName(file.name);
@@ -285,34 +358,38 @@ export default function Dashboard() {
     if (file) handleFile(file);
   }, [handleFile]);
 
+  // ---------- 컬럼 매칭 확정 시 -> 공유 저장소에 업로드 데이터 저장 ----------
   const handleConfirmMapping = useCallback(async () => {
     setMappingConfirmed(true);
     setSyncStatus("saving");
-    const ok = await saveToStorage(STORAGE_KEYS.upload, {
+    const ok = await saveToStorage(keys.upload, {
       fileName, headers, mapping, rawRows,
       uploadedAt: new Date().toISOString(),
     });
     setSyncStatus(ok ? "saved" : "error");
     if (ok) setLastSyncedAt(new Date().toISOString());
-  }, [fileName, headers, mapping, rawRows]);
+  }, [fileName, headers, mapping, rawRows, keys]);
 
+  // ---------- 새 파일 업로드(리셋) ----------
   const handleResetFile = useCallback(async () => {
     setRawRows(null); setMapping(null); setMappingConfirmed(false); setHeaders([]);
-    await deleteFromStorage(STORAGE_KEYS.upload);
-  }, []);
+    await deleteFromStorage(keys.upload);
+  }, [keys]);
 
+  // ---------- 전체 공유 데이터 초기화 (예산 포함) ----------
   const handleResetAll = useCallback(async () => {
-    const confirmed = window.confirm("팀 전체가 공유 중인 데이터(업로드 파일 + 입력한 모든 예산)가 삭제됩니다. 계속할까요?");
+    const confirmed = window.confirm(`${title.name}의 팀 전체 공유 데이터(업로드 파일 + 입력한 모든 예산)가 삭제됩니다. 계속할까요?`);
     if (!confirmed) return;
     setRawRows(null); setMapping(null); setMappingConfirmed(false); setHeaders([]);
     setCampaignBudgets({});
     await Promise.all([
-      deleteFromStorage(STORAGE_KEYS.upload),
-      deleteFromStorage(STORAGE_KEYS.budgets),
-      deleteFromStorage(STORAGE_KEYS.decisionDate),
+      deleteFromStorage(keys.upload),
+      deleteFromStorage(keys.budgets),
+      deleteFromStorage(keys.decisionDate),
     ]);
-  }, []);
+  }, [keys, title.name]);
 
+  // ---------- 파싱된 데이터 정규화 ----------
   const parsedData = useMemo(() => {
     if (!rawRows || !mapping || !mappingConfirmed) return null;
     const missing = REQUIRED_FIELDS.filter((f) => !mapping[f]);
@@ -334,12 +411,12 @@ export default function Dashboard() {
       const ad14 = mapping.adview_d14 ? (parseFloat(r[mapping.adview_d14]) || null) : null;
       const installs = mapping.installs ? (parseFloat(r[mapping.installs]) || 0) : null;
 
-      const rev7 = iap7 * IAP_RATE + ad7 * AD_RATE;
-      const rev14 = (iap14 != null && ad14 != null) ? (iap14 * IAP_RATE + ad14 * AD_RATE) : null;
+      const rev7 = iap7 * config.iapRate + ad7 * config.adRate;
+      const rev14 = (iap14 != null && ad14 != null) ? (iap14 * config.iapRate + ad14 * config.adRate) : null;
 
       rows.push({
         date: dateStr,
-        campaign: campaign || null,
+        campaign: campaign || null, // null = 오가닉
         cost,
         rev7,
         rev14,
@@ -350,8 +427,9 @@ export default function Dashboard() {
     }
     if (rows.length === 0) return null;
     return rows;
-  }, [rawRows, mapping, mappingConfirmed]);
+  }, [rawRows, mapping, mappingConfirmed, config.iapRate, config.adRate]);
 
+  // ---------- 캠페인 목록 ----------
   const campaignList = useMemo(() => {
     if (!parsedData) return [];
     const set = new Set();
@@ -359,6 +437,7 @@ export default function Dashboard() {
     return Array.from(set).sort();
   }, [parsedData]);
 
+  // ---------- 날짜 범위 ----------
   const dateInfo = useMemo(() => {
     if (!parsedData) return null;
     const dates = parsedData.map((r) => r.date);
@@ -367,9 +446,11 @@ export default function Dashboard() {
     return { minDate, maxDate, allDates: buildDateRange(minDate, maxDate) };
   }, [parsedData]);
 
+  // ---------- 판단 시점 계산 (가장 최근 월/목, 또는 override) ----------
   const decisionDate = useMemo(() => {
     if (!dateInfo) return null;
     if (decisionDateOverride) return decisionDateOverride;
+    // maxDate 기준 다음 월요일 또는 목요일 찾기 (오늘 이후 가장 가까운 월/목)
     let cur = new Date(dateInfo.maxDate);
     for (let i = 0; i < 7; i++) {
       const wd = cur.getDay();
@@ -381,9 +462,11 @@ export default function Dashboard() {
     return dateInfo.maxDate;
   }, [dateInfo, decisionDateOverride]);
 
-  const markDate7 = decisionDate ? addDays(decisionDate, -8) : null;
-  const markDate14 = decisionDate ? addDays(decisionDate, -8) : null;
+  const markDate7 = decisionDate ? addDays(decisionDate, -8) : null; // 7일 이동평균용 마지노선
+  const markDate14 = decisionDate ? addDays(decisionDate, -8) : null; // 14일도 동일 마지노선 기준
+  const prevDecisionDate = decisionDate ? addDays(decisionDate, -3) : null; // 근사치, 아래서 실제 보정
 
+  // ---------- 1번 룰: Blended ROAS 계산 ----------
   const blendedAnalysis = useMemo(() => {
     if (!parsedData || !dateInfo) return null;
 
@@ -409,11 +492,13 @@ export default function Dashboard() {
 
     const ma7 = rollingMean(roasSeries, dateInfo.allDates, 7);
 
+    // 판단 시점들 (월/목) 전체 나열 + 직전 판단 찾기
     const decisionPoints = dateInfo.allDates.filter((d) => {
       const wd = getWeekday(d);
       return wd === 1 || wd === 4;
     });
 
+    // 차트용 시리즈
     const chartData = dateInfo.allDates
       .filter((d) => ma7[d] != null)
       .map((d) => ({ date: d.slice(5), value: ma7[d] }));
@@ -426,12 +511,13 @@ export default function Dashboard() {
     const currentMa = blendedAnalysis.ma7[markDate7];
     if (currentMa == null) return { insufficient: true };
 
+    // 직전 판단 시점 찾기 (decisionPoints 중 decisionDate 바로 이전 것)
     const dp = blendedAnalysis.decisionPoints.filter((d) => d < decisionDate);
     const prevDecision = dp.length > 0 ? dp[dp.length - 1] : null;
     const prevMark = prevDecision ? addDays(prevDecision, -8) : null;
     const prevMa = prevMark ? blendedAnalysis.ma7[prevMark] : null;
 
-    const zone = getZone(currentMa);
+    const zone = getZone(currentMa, config);
     const deltaPp = prevMa != null ? currentMa - prevMa : null;
     const stability = stabilityMultiplier(deltaPp);
     const finalRate = zone.rate * stability.mult;
@@ -441,8 +527,9 @@ export default function Dashboard() {
       currentMa, prevMa, deltaPp, zone, stability, finalRate,
       markDate7, prevMark,
     };
-  }, [blendedAnalysis, markDate7, decisionDate]);
+  }, [blendedAnalysis, markDate7, decisionDate, config]);
 
+  // 전체 현재 운영예산 = 캠페인별 입력 예산 합계
   const currentTotalBudget = useMemo(() => {
     return campaignList.reduce((sum, c) => sum + (parseFloat(campaignBudgets[c]) || 0), 0);
   }, [campaignList, campaignBudgets]);
@@ -450,13 +537,15 @@ export default function Dashboard() {
   const rule1Budget = useMemo(() => {
     if (!rule1Result || rule1Result.insufficient) return null;
     const raw = currentTotalBudget * (1 + rule1Result.finalRate);
-    const rounded = roundToUnit(raw, BUDGET_ROUND_UNIT);
+    const rounded = roundToUnit(raw, config.budgetRoundUnit);
     return { raw, rounded, delta: rounded - currentTotalBudget };
-  }, [rule1Result, currentTotalBudget]);
+  }, [rule1Result, currentTotalBudget, config.budgetRoundUnit]);
 
+  // ---------- 2번 룰: 캠페인별 분석 ----------
   const campaignAnalysis = useMemo(() => {
     if (!parsedData || !dateInfo || !markDate7) return null;
 
+    // 캠페인별 일별 cost/rev 맵
     const perCampaign = {};
     campaignList.forEach((c) => { perCampaign[c] = {}; });
     parsedData.forEach((r) => {
@@ -472,6 +561,7 @@ export default function Dashboard() {
       }
     });
 
+    // 캠페인별 평균 일비용 (풀 필터링용)
     const avgDailyCost = {};
     campaignList.forEach((c) => {
       const entries = Object.values(perCampaign[c]);
@@ -479,8 +569,9 @@ export default function Dashboard() {
       avgDailyCost[c] = entries.length > 0 ? totalCost / entries.length : 0;
     });
 
-    const eligibleCampaigns = campaignList.filter((c) => avgDailyCost[c] > MIN_CAMPAIGN_COST_FOR_POOL);
+    const eligibleCampaigns = campaignList.filter((c) => avgDailyCost[c] > config.minCampaignCostForPool);
 
+    // 캠페인별 ma7, ma14 (markDate7 시점)
     const campaignMa = {};
     eligibleCampaigns.forEach((c) => {
       const dates = dateInfo.allDates;
@@ -500,6 +591,7 @@ export default function Dashboard() {
       };
     });
 
+    // 유료 전체 평균(기준선) - markDate7 시점, eligible 캠페인들의 7일 이동평균 cost/rev 총합 기반
     const paidTotalSeries = {};
     dateInfo.allDates.forEach((d) => {
       let cost = 0, rev = 0;
@@ -512,6 +604,7 @@ export default function Dashboard() {
     const paidTotalMa7 = rollingMean(paidTotalSeries, dateInfo.allDates, 7);
     const benchmark = paidTotalMa7[markDate7];
 
+    // 그룹 분류
     const campaigns = eligibleCampaigns
       .filter((c) => campaignMa[c].hasData)
       .map((c) => {
@@ -519,7 +612,7 @@ export default function Dashboard() {
         const ma14 = campaignMa[c].ma14;
         const group = benchmark != null ? (ma7 >= benchmark ? "above" : "below") : null;
         const gap = benchmark != null ? ma7 - benchmark : null;
-        const terminationFlag = ma14 != null && ma14 <= TERMINATION_THRESHOLD;
+        const terminationFlag = ma14 != null && ma14 <= config.terminationThreshold;
         return {
           name: c,
           ma7, ma14, group, gap, terminationFlag,
@@ -531,12 +624,13 @@ export default function Dashboard() {
     const excludedCampaigns = campaignList.filter((c) => !eligibleCampaigns.includes(c) || !campaignMa[c]?.hasData);
 
     return { campaigns, benchmark, excludedCampaigns, eligibleCampaigns };
-  }, [parsedData, dateInfo, markDate7, markDate14, campaignList, campaignBudgets]);
+  }, [parsedData, dateInfo, markDate7, markDate14, campaignList, campaignBudgets, config]);
 
+  // ---------- 2번 룰: 배분 계산 ----------
   const rule2Allocation = useMemo(() => {
     if (!campaignAnalysis || !rule1Budget) return null;
     const { campaigns } = campaignAnalysis;
-    const totalAdjust = rule1Budget.delta;
+    const totalAdjust = rule1Budget.delta; // +면 증액, -면 감액, 0이면 배분 없음
 
     const result = {};
     campaigns.forEach((c) => { result[c.name] = { allocated: 0, newBudget: c.currentBudget }; });
@@ -554,7 +648,7 @@ export default function Dashboard() {
       if (targetGroup.includes(c) && totalGap > 0) {
         const share = Math.abs(c.gap) / totalGap;
         const rawAlloc = totalAdjust * share;
-        const roundedAlloc = roundToUnit(rawAlloc, BUDGET_ROUND_UNIT);
+        const roundedAlloc = roundToUnit(rawAlloc, config.budgetRoundUnit);
         result[c.name] = {
           allocated: roundedAlloc,
           newBudget: c.currentBudget + roundedAlloc,
@@ -566,12 +660,14 @@ export default function Dashboard() {
     });
 
     return { totalAdjust, perCampaign: result, mode, targetGroup: targetGroup.map(c => c.name) };
-  }, [campaignAnalysis, rule1Budget]);
+  }, [campaignAnalysis, rule1Budget, config.budgetRoundUnit]);
 
+  // ---------- 인사이트 자동 생성 ----------
   const insights = useMemo(() => {
     if (!rule1Result || rule1Result.insufficient || !campaignAnalysis) return [];
     const list = [];
 
+    // 추세 코멘트
     if (rule1Result.deltaPp != null) {
       if (Math.abs(rule1Result.deltaPp) > 0.10) {
         list.push({
@@ -585,6 +681,7 @@ export default function Dashboard() {
       }
     }
 
+    // D14 데이터 가용성 안내
     const hasAnyD14 = campaignAnalysis.campaigns.some((c) => c.ma14 != null);
     if (!hasAnyD14) {
       list.push({
@@ -593,16 +690,18 @@ export default function Dashboard() {
       });
     }
 
+    // 종료 후보
     const terminationCandidates = campaignAnalysis.campaigns.filter((c) => c.terminationFlag);
     if (terminationCandidates.length > 0) {
       terminationCandidates.forEach((c) => {
         list.push({
           type: "danger",
-          text: `${c.name} — 14일 이동평균 D7 ROAS ${fmtPct(c.ma14)}로 종료 임계값(${fmtPct(TERMINATION_THRESHOLD, 0)}) 이하입니다. 종료 검토가 필요합니다.`,
+          text: `${c.name} — 14일 이동평균 D7 ROAS ${fmtPct(c.ma14)}로 종료 임계값(${fmtPct(config.terminationThreshold, 0)}) 이하입니다. 종료 검토가 필요합니다.`,
         });
       });
     }
 
+    // 압도적 상위/하위
     const sorted = [...campaignAnalysis.campaigns].filter(c => c.gap != null).sort((a, b) => b.gap - a.gap);
     if (sorted.length > 0 && sorted[0].gap > 0.15) {
       list.push({
@@ -618,18 +717,22 @@ export default function Dashboard() {
       });
     }
 
+    // 데이터 부족 캠페인
     if (campaignAnalysis.excludedCampaigns.length > 0) {
       list.push({
         type: "info",
-        text: `${campaignAnalysis.excludedCampaigns.join(", ")} — 일평균 비용 $${MIN_CAMPAIGN_COST_FOR_POOL} 이하 또는 데이터 부족으로 이번 판단에서 제외되었습니다.`,
+        text: `${campaignAnalysis.excludedCampaigns.join(", ")} — 일평균 비용 $${config.minCampaignCostForPool} 이하 또는 데이터 부족으로 이번 판단에서 제외되었습니다.`,
       });
     }
 
     return list;
-  }, [rule1Result, campaignAnalysis]);
+  }, [rule1Result, campaignAnalysis, config]);
 
   const toggleSection = (key) => setExpandedSections((s) => ({ ...s, [key]: !s[key] }));
 
+  // ============================================================
+  // 렌더링
+  // ============================================================
   return (
     <div style={{
       fontFamily: "'IBM Plex Sans', 'Inter', system-ui, sans-serif",
@@ -644,11 +747,13 @@ export default function Dashboard() {
         ::-webkit-scrollbar { width: 8px; height: 8px; }
         ::-webkit-scrollbar-track { background: #1A1D24; }
         ::-webkit-scrollbar-thumb { background: #353A45; border-radius: 4px; }
+        input[type="number"]::-webkit-inner-spin-button { opacity: 1; }
         table { border-collapse: collapse; width: 100%; }
         th, td { text-align: left; }
       `}</style>
 
-      <Header fileName={fileName} parsedData={parsedData} dateInfo={dateInfo} decisionDate={decisionDate}
+      <Header title={title} onBack={onBack} onOpenSettings={onOpenSettings}
+        fileName={fileName} parsedData={parsedData} dateInfo={dateInfo} decisionDate={decisionDate}
         onDecisionDateChange={setDecisionDateOverride} syncStatus={syncStatus} lastSyncedAt={lastSyncedAt} />
 
       <div style={{ maxWidth: 1180, margin: "0 auto", padding: "0 24px 64px" }}>
@@ -686,12 +791,14 @@ export default function Dashboard() {
               blendedAnalysis={blendedAnalysis}
               decisionDate={decisionDate}
               markDate7={markDate7}
+              config={config}
             />
 
             <Rule2Panel
               campaignAnalysis={campaignAnalysis}
               rule2Allocation={rule2Allocation}
               rule1Result={rule1Result}
+              config={config}
             />
 
             <InsightsPanel
@@ -716,7 +823,11 @@ export default function Dashboard() {
   );
 }
 
-function Header({ fileName, parsedData, dateInfo, decisionDate, onDecisionDateChange, syncStatus, lastSyncedAt }) {
+// ============================================================
+// 서브 컴포넌트들
+// ============================================================
+
+function Header({ title, onBack, onOpenSettings, fileName, parsedData, dateInfo, decisionDate, onDecisionDateChange, syncStatus, lastSyncedAt }) {
   const syncLabel = syncStatus === "saving" ? "저장 중..."
     : syncStatus === "error" ? "저장 실패 (새로고침 시 사라질 수 있음)"
     : lastSyncedAt ? `팀 공유 데이터 · ${new Date(lastSyncedAt).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })} 동기화`
@@ -730,10 +841,24 @@ function Header({ fileName, parsedData, dateInfo, decisionDate, onDecisionDateCh
       padding: "28px 24px 24px",
     }}>
       <div style={{ maxWidth: 1180, margin: "0 auto" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+          <button onClick={onBack} style={{
+            display: "flex", alignItems: "center", gap: 6, background: "transparent", border: "none",
+            color: "#9499A6", fontSize: 13, cursor: "pointer", padding: "4px 0",
+          }}>
+            <ArrowLeft size={14} /> 타이틀 선택으로
+          </button>
+          <button onClick={onOpenSettings} style={{
+            display: "flex", alignItems: "center", gap: 6, background: "#161A22", border: "1px solid #2A2E38",
+            color: "#9499A6", fontSize: 12.5, cursor: "pointer", padding: "6px 12px", borderRadius: 7,
+          }}>
+            <Settings size={13} /> 룰 설정
+          </button>
+        </div>
         <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
           <div>
             <div style={{ fontSize: 11, letterSpacing: "0.12em", color: "#6B7280", textTransform: "uppercase", marginBottom: 6 }}>
-              Performance Marketing · Rule Engine
+              {title.name} · Performance Marketing Rule Engine
             </div>
             <h1 style={{ fontSize: 26, fontWeight: 700, margin: 0, letterSpacing: "-0.01em" }}>
               캠페인 지표 체크 &amp; 예산 제안
@@ -852,7 +977,7 @@ function ColumnMappingPanel({ headers, mapping, setMapping, onConfirm, sampleRow
       {sampleRow && (
         <div style={{ marginTop: 18, fontSize: 12, color: "#6B7280" }}>
           예시 행: {Object.entries(mapping).filter(([,v]) => v).map(([k, v]) => (
-            <span key={k} className="mono" style={{ marginRight: 14 }}>{k}="{String(sampleRow[v]).slice(0,20)}"</span>
+            <span key={k} className="mono" style={{ marginRight: 14 }}>{k}=&quot;{String(sampleRow[v]).slice(0,20)}&quot;</span>
           ))}
         </div>
       )}
@@ -885,7 +1010,7 @@ function BudgetInputPanel({ campaignList, campaignBudgets, setCampaignBudgets, c
   return (
     <SectionCard
       title="현재 운영 예산 입력"
-      subtitle="각 캠페인에 실제로 설정된 일/주 예산을 입력하세요. 이 값이 모든 룰 계산의 '직전 예산' 기준이 됩니다. 팀원 누구나 입력하면 전체에 공유됩니다."
+      subtitle="각 캠페인에 실제로 설정된 일/주 예산을 입력하세요. 이 값이 모든 룰 계산의 '직전 예산' 기준이 됩니다."
       icon={<DollarSign size={16} color="#5B8DEF" />}
       open={open}
       onToggle={() => setOpen((o) => !o)}
@@ -916,7 +1041,7 @@ function BudgetInputPanel({ campaignList, campaignBudgets, setCampaignBudgets, c
   );
 }
 
-function Rule1Panel({ rule1Result, rule1Budget, currentTotalBudget, blendedAnalysis, decisionDate, markDate7 }) {
+function Rule1Panel({ rule1Result, rule1Budget, currentTotalBudget, blendedAnalysis, decisionDate, markDate7, config }) {
   const [open, setOpen] = useState(true);
   if (!rule1Result) return null;
 
@@ -941,7 +1066,7 @@ function Rule1Panel({ rule1Result, rule1Budget, currentTotalBudget, blendedAnaly
       <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr", gap: 24 }}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 12 }}>
           <MetricBox label="Blended D7 ROAS (7일 이동평균)" value={fmtPct(currentMa)} accent={zone.color} />
-          <MetricBox label="목표(40%) 대비" value={fmtPp(currentMa - TARGET_ROAS)} accent={currentMa >= TARGET_ROAS ? "#1E7B45" : "#A4262C"} />
+          <MetricBox label={`목표(${fmtPct(config.targetRoas, 0)}) 대비`} value={fmtPp(currentMa - config.targetRoas)} accent={currentMa >= config.targetRoas ? "#1E7B45" : "#A4262C"} />
           <MetricBox label="구간" value={zone.label} accent={zone.color} />
           <MetricBox
             label="직전 판단 대비"
@@ -958,7 +1083,7 @@ function Rule1Panel({ rule1Result, rule1Budget, currentTotalBudget, blendedAnaly
           <div style={{ height: 1, background: "#23262E", margin: "4px 0" }} />
           <Row label="현재 운영 예산" value={fmtMoney(currentTotalBudget)} />
           <Row label="계산값" value={fmtMoney(rule1Budget?.raw)} muted />
-          <Row label={`제안 예산 ($${BUDGET_ROUND_UNIT} 단위 반올림)`} value={fmtMoney(rule1Budget?.rounded)} bold big />
+          <Row label={`제안 예산 ($${config.budgetRoundUnit} 단위 반올림)`} value={fmtMoney(rule1Budget?.rounded)} bold big />
           <Row label="변화액" value={fmtMoneySigned(rule1Budget?.delta)} accent={rule1Budget?.delta > 0 ? "#1E7B45" : rule1Budget?.delta < 0 ? "#A4262C" : "#6B7280"} />
         </div>
       </div>
@@ -987,7 +1112,7 @@ function Rule1Panel({ rule1Result, rule1Budget, currentTotalBudget, blendedAnaly
                   labelStyle={{ color: "#9499A6" }}
                   formatter={(v) => [`${(v * 100).toFixed(1)}%`, "ROAS"]}
                 />
-                <ReferenceLine y={TARGET_ROAS} stroke="#5D6270" strokeDasharray="4 4" label={{ value: "목표 40%", position: "insideTopRight", fill: "#6B7280", fontSize: 11 }} />
+                <ReferenceLine y={config.targetRoas} stroke="#5D6270" strokeDasharray="4 4" label={{ value: `목표 ${fmtPct(config.targetRoas, 0)}`, position: "insideTopRight", fill: "#6B7280", fontSize: 11 }} />
                 {markDate7 && blendedAnalysis.chartData.some((d) => d.date === markDate7.slice(5)) && (
                   <ReferenceLine
                     x={markDate7.slice(5)}
@@ -1007,7 +1132,7 @@ function Rule1Panel({ rule1Result, rule1Budget, currentTotalBudget, blendedAnaly
   );
 }
 
-function Rule2Panel({ campaignAnalysis, rule2Allocation, rule1Result }) {
+function Rule2Panel({ campaignAnalysis, rule2Allocation, rule1Result, config }) {
   const [open, setOpen] = useState(true);
   if (!campaignAnalysis) return null;
   const { campaigns, benchmark, excludedCampaigns } = campaignAnalysis;
@@ -1025,7 +1150,7 @@ function Rule2Panel({ campaignAnalysis, rule2Allocation, rule1Result }) {
           background: "#161A22", border: "1px solid #2A2E38", borderRadius: 8, padding: "10px 14px",
           fontSize: 12.5, color: "#9499A6", marginBottom: 14, display: "flex", gap: 8, alignItems: "center",
         }}>
-          <Info size={14} color="#5B8DEF" /> 1번 룰이 "조정 없음"이라 이번 사이클은 캠페인 간 배분이 발생하지 않습니다. 아래는 그룹 분류 참고용입니다.
+          <Info size={14} color="#5B8DEF" /> 1번 룰이 &quot;조정 없음&quot;이라 이번 사이클은 캠페인 간 배분이 발생하지 않습니다. 아래는 그룹 분류 참고용입니다.
         </div>
       )}
 
@@ -1078,7 +1203,7 @@ function Rule2Panel({ campaignAnalysis, rule2Allocation, rule1Result }) {
 
       {excludedCampaigns.length > 0 && (
         <div style={{ marginTop: 16, fontSize: 12, color: "#5D6270" }}>
-          제외됨 (데이터 부족 또는 일평균 비용 ${MIN_CAMPAIGN_COST_FOR_POOL} 이하): {excludedCampaigns.join(", ")}
+          제외됨 (데이터 부족 또는 일평균 비용 ${config.minCampaignCostForPool} 이하): {excludedCampaigns.join(", ")}
         </div>
       )}
     </SectionCard>
@@ -1118,6 +1243,7 @@ function InsightsPanel({ insights, expanded, onToggle }) {
   );
 }
 
+// ---------- 공통 작은 컴포넌트 ----------
 function SectionCard({ title, subtitle, icon, open, onToggle, rightContent, children }) {
   return (
     <div style={{ marginTop: 24, background: "#13151A", border: "1px solid #23262E", borderRadius: 12, overflow: "hidden" }}>
@@ -1184,3 +1310,273 @@ const resetButtonStyle = {
   background: "transparent", border: "1px solid #2A2E38", color: "#9499A6",
   borderRadius: 8, padding: "9px 18px", fontSize: 13, cursor: "pointer",
 };
+
+// ============================================================
+// 타이틀 선택 화면
+// ============================================================
+function TitleSelector({ onSelect }) {
+  return (
+    <div style={{
+      fontFamily: "'IBM Plex Sans', 'Inter', system-ui, sans-serif",
+      background: "#0F1115", color: "#E8E9ED", minHeight: "100vh",
+      display: "flex", alignItems: "center", justifyContent: "center", padding: 24,
+    }}>
+      <div style={{ maxWidth: 720, width: "100%" }}>
+        <div style={{ textAlign: "center", marginBottom: 40 }}>
+          <div style={{ fontSize: 11, letterSpacing: "0.12em", color: "#6B7280", textTransform: "uppercase", marginBottom: 10 }}>
+            Performance Marketing · Rule Engine
+          </div>
+          <h1 style={{ fontSize: 28, fontWeight: 700, margin: 0 }}>어떤 타이틀을 확인할까요?</h1>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 16 }}>
+          {TITLES.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => onSelect(t)}
+              style={{
+                background: "#13151A", border: "1px solid #23262E", borderRadius: 14,
+                padding: "32px 24px", textAlign: "left", cursor: "pointer", color: "#E8E9ED",
+                display: "flex", flexDirection: "column", gap: 14, transition: "border-color 0.15s",
+              }}
+              onMouseEnter={(e) => e.currentTarget.style.borderColor = "#5B8DEF"}
+              onMouseLeave={(e) => e.currentTarget.style.borderColor = "#23262E"}
+            >
+              <div style={{
+                width: 44, height: 44, borderRadius: 10, background: "#161A22",
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}>
+                <Gamepad2 size={22} color="#5B8DEF" />
+              </div>
+              <div>
+                <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>{t.name}</div>
+                {t.subtitle && <div style={{ fontSize: 12.5, color: "#6B7280" }}>{t.subtitle}</div>}
+              </div>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// 룰 설정 페이지 — 타이틀별로 기본 룰 값을 override
+// ============================================================
+function RuleSettingsPage({ title, config, onSave, onResetToDefault, onClose }) {
+  const [draft, setDraft] = useState(config);
+  const [saved, setSaved] = useState(false);
+
+  const updateField = (field, value) => {
+    setDraft((d) => ({ ...d, [field]: value }));
+    setSaved(false);
+  };
+  const updateZone = (idx, field, value) => {
+    setDraft((d) => {
+      const zones = d.zones.map((z, i) => (i === idx ? { ...z, [field]: value } : z));
+      return { ...d, zones };
+    });
+    setSaved(false);
+  };
+
+  const handleSave = () => {
+    onSave(draft);
+    setSaved(true);
+  };
+
+  const isDefault = JSON.stringify(draft) === JSON.stringify(DEFAULT_CONFIG);
+
+  return (
+    <div style={{
+      fontFamily: "'IBM Plex Sans', 'Inter', system-ui, sans-serif",
+      background: "#0F1115", color: "#E8E9ED", minHeight: "100vh",
+    }}>
+      <style>{`
+        * { box-sizing: border-box; }
+        .mono { font-family: 'IBM Plex Mono', 'JetBrains Mono', monospace; }
+        input[type="number"] { background: #0F1115; border: 1px solid #2A2E38; border-radius: 5px; color: #E8E9ED; padding: 6px 9px; font-size: 13px; width: 90px; }
+      `}</style>
+      <div style={{
+        borderBottom: "1px solid #23262E", background: "linear-gradient(180deg, #14161B 0%, #0F1115 100%)",
+        padding: "24px 24px 20px",
+      }}>
+        <div style={{ maxWidth: 760, margin: "0 auto" }}>
+          <button onClick={onClose} style={{
+            display: "flex", alignItems: "center", gap: 6, background: "transparent", border: "none",
+            color: "#9499A6", fontSize: 13, cursor: "pointer", padding: "4px 0", marginBottom: 14,
+          }}>
+            <ArrowLeft size={14} /> 대시보드로 돌아가기
+          </button>
+          <div style={{ fontSize: 11, letterSpacing: "0.12em", color: "#6B7280", textTransform: "uppercase", marginBottom: 6 }}>
+            {title.name} · 룰 설정
+          </div>
+          <h1 style={{ fontSize: 24, fontWeight: 700, margin: 0 }}>이 타이틀의 룰 값 조정</h1>
+          <p style={{ fontSize: 13, color: "#9499A6", marginTop: 8, lineHeight: 1.6 }}>
+            아래 값들은 이 타이틀({title.name})에만 적용됩니다. 다른 타이틀에는 영향을 주지 않습니다.
+            기본값으로 두면 모든 타이틀이 동일한 기준으로 운영됩니다.
+          </p>
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 760, margin: "0 auto", padding: "28px 24px 64px" }}>
+        <SettingsSection title="공통 지표">
+          <SettingsRow label="ROAS 목표 (%)">
+            <PercentInput value={draft.targetRoas} onChange={(v) => updateField("targetRoas", v)} />
+          </SettingsRow>
+          <SettingsRow label="IAP 수수료 제외 비율 (%)">
+            <PercentInput value={draft.iapRate} onChange={(v) => updateField("iapRate", v)} />
+          </SettingsRow>
+          <SettingsRow label="Ad View 인정 비율 (%)">
+            <PercentInput value={draft.adRate} onChange={(v) => updateField("adRate", v)} />
+          </SettingsRow>
+          <SettingsRow label="예산 조정 단위 ($)">
+            <input type="number" value={draft.budgetRoundUnit} onChange={(e) => updateField("budgetRoundUnit", Number(e.target.value))} />
+          </SettingsRow>
+          <SettingsRow label="캠페인 풀 최소 일평균 비용 ($)">
+            <input type="number" value={draft.minCampaignCostForPool} onChange={(e) => updateField("minCampaignCostForPool", Number(e.target.value))} />
+          </SettingsRow>
+          <SettingsRow label="종료 검토 임계값 (14일MA, %)">
+            <PercentInput value={draft.terminationThreshold} onChange={(v) => updateField("terminationThreshold", v)} />
+          </SettingsRow>
+        </SettingsSection>
+
+        <SettingsSection title="전체 예산 조정 구간표">
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {draft.zones.map((z, i) => (
+              <div key={z.key} style={{
+                display: "grid", gridTemplateColumns: "110px 70px 12px 70px 1fr", gap: 10, alignItems: "center",
+                background: "#161A22", borderRadius: 8, padding: "10px 12px", fontSize: 13,
+              }}>
+                <span style={{ color: "#C5C8D1" }}>{z.label}</span>
+                <PercentInput value={z.min} onChange={(v) => updateZone(i, "min", v)} disabled={z.min == null} small />
+                <span style={{ color: "#5D6270", textAlign: "center" }}>~</span>
+                <PercentInput value={z.max} onChange={(v) => updateZone(i, "max", v)} disabled={z.max == null} small />
+                {z.rateMin != null ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, color: "#9499A6" }}>
+                    조정 <PercentInput value={z.rateMin} onChange={(v) => updateZone(i, "rateMin", v)} small /> ~ <PercentInput value={z.rateMax} onChange={(v) => updateZone(i, "rateMax", v)} small />
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, color: "#9499A6" }}>
+                    조정 <PercentInput value={z.rate} onChange={(v) => updateZone(i, "rate", v)} small />
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+          <p style={{ fontSize: 11.5, color: "#5D6270", marginTop: 10 }}>
+            최상단/최하단 구간의 min/max는 비워둔 상태(무제한)를 유지하는 게 안전합니다.
+          </p>
+        </SettingsSection>
+
+        <div style={{ display: "flex", gap: 10, marginTop: 28, alignItems: "center" }}>
+          <button onClick={handleSave} style={{
+            background: "#5B8DEF", color: "#fff", border: "none", borderRadius: 8,
+            padding: "10px 22px", fontSize: 14, fontWeight: 600, cursor: "pointer",
+          }}>
+            이 타이틀에 저장
+          </button>
+          <button onClick={() => { setDraft(DEFAULT_CONFIG); onResetToDefault(); setSaved(true); }} disabled={isDefault} style={{
+            background: "transparent", border: "1px solid #2A2E38", color: isDefault ? "#3D4250" : "#9499A6",
+            borderRadius: 8, padding: "10px 18px", fontSize: 13, cursor: isDefault ? "not-allowed" : "pointer",
+          }}>
+            기본값으로 초기화
+          </button>
+          {saved && (
+            <span style={{ fontSize: 12.5, color: "#3D8B5F", display: "flex", alignItems: "center", gap: 5 }}>
+              <CheckCircle2 size={14} /> 저장됨
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SettingsSection({ title, children }) {
+  return (
+    <div style={{ marginBottom: 28 }}>
+      <h2 style={{ fontSize: 15, fontWeight: 700, marginBottom: 14, color: "#C5C8D1" }}>{title}</h2>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>{children}</div>
+    </div>
+  );
+}
+
+function SettingsRow({ label, children }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "#13151A", border: "1px solid #23262E", borderRadius: 8, padding: "10px 14px" }}>
+      <span style={{ fontSize: 13, color: "#9499A6" }}>{label}</span>
+      {children}
+    </div>
+  );
+}
+
+// 내부적으로 0~1 소수(예: 0.4)를 사람이 보는 % 단위(40)로 변환해서 입력받는 인풋
+function PercentInput({ value, onChange, disabled, small }) {
+  const displayValue = value == null ? "" : Math.round(value * 1000) / 10;
+  return (
+    <input
+      type="number"
+      step="0.1"
+      value={displayValue}
+      disabled={disabled}
+      onChange={(e) => onChange(e.target.value === "" ? null : Number(e.target.value) / 100)}
+      style={{
+        background: disabled ? "#0B0D10" : "#0F1115",
+        border: "1px solid #2A2E38", borderRadius: 5,
+        color: disabled ? "#3D4250" : "#E8E9ED",
+        padding: "6px 9px", fontSize: 13, width: small ? 64 : 90,
+      }}
+    />
+  );
+}
+
+// ============================================================
+// 최상위 앱 — 타이틀 선택 / 대시보드 / 룰 설정 페이지 라우팅
+// ============================================================
+export default function App() {
+  const [selectedTitle, setSelectedTitle] = useState(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [settingsConfig, setSettingsConfig] = useState(DEFAULT_CONFIG);
+  const [configVersion, setConfigVersion] = useState(0); // config가 바뀌면 DashboardForTitle을 새로 마운트하기 위한 트리거
+
+  // 설정 페이지에서 보여줄 현재 config를 가져옴 (RuleSettingsPage를 열 때 최신값 필요)
+  useEffect(() => {
+    if (!showSettings || !selectedTitle) return;
+    (async () => {
+      const keys = storageKeys(selectedTitle.id);
+      const saved = await loadFromStorage(keys.ruleConfig);
+      setSettingsConfig(saved ? { ...DEFAULT_CONFIG, ...saved } : DEFAULT_CONFIG);
+    })();
+  }, [showSettings, selectedTitle]);
+
+  if (!selectedTitle) {
+    return <TitleSelector onSelect={setSelectedTitle} />;
+  }
+
+  if (showSettings) {
+    const keys = storageKeys(selectedTitle.id);
+    return (
+      <RuleSettingsPage
+        title={selectedTitle}
+        config={settingsConfig}
+        onSave={async (newConfig) => {
+          await saveToStorage(keys.ruleConfig, newConfig);
+          setConfigVersion((v) => v + 1);
+        }}
+        onResetToDefault={async () => {
+          await deleteFromStorage(keys.ruleConfig);
+          setConfigVersion((v) => v + 1);
+        }}
+        onClose={() => setShowSettings(false)}
+      />
+    );
+  }
+
+  return (
+    <DashboardForTitle
+      key={`${selectedTitle.id}-${configVersion}`}
+      title={selectedTitle}
+      onBack={() => setSelectedTitle(null)}
+      onOpenSettings={() => setShowSettings(true)}
+    />
+  );
+}
