@@ -1,7 +1,7 @@
 // ============================================================
-// campaign-dashboard v1.6 (2026-06-22)
-// 변경사항: 예산 소진율 모니터링 추가 - 상위그룹(증액 후보) 캠페인 중 최근7일 실제비용이
-// 설정 예산을 못 채우는 경우 "타겟 조정 검토" 신호 (테이블 소진율 컬럼 + 인사이트)
+// campaign-dashboard v1.7 (2026-06-22)
+// 변경사항: 예산 CSV 일괄 적용 시, CSV에 없는 기존 캠페인은 0원으로 자동 처리
+// (운영 종료로 간주). 미리보기에서 실제로 0원이 될 캠페인만 강조 경고.
 // ============================================================
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import Papa from "papaparse";
@@ -1141,6 +1141,8 @@ function BudgetInputPanel({ campaignList, campaignBudgets, setCampaignBudgets, c
     setCampaignBudgets((b) => {
       const next = { ...b };
       csvPreview.matched.forEach(({ name, budget }) => { next[name] = String(budget); });
+      // CSV에 포함되지 않은 기존 캠페인은 0원으로 처리 (운영 종료로 간주)
+      csvPreview.notInCsv.forEach((name) => { next[name] = "0"; });
       return next;
     });
     setCsvPreview(null);
@@ -1222,11 +1224,28 @@ function BudgetInputPanel({ campaignList, campaignBudgets, setCampaignBudgets, c
               CSV에 있지만 현재 캠페인 목록에 없는 이름 ({csvPreview.unmatched.length}개): {csvPreview.unmatched.join(", ")}
             </div>
           )}
-          {csvPreview.notInCsv.length > 0 && (
-            <div style={{ fontSize: 12, color: "#6B7280", marginBottom: 10 }}>
-              CSV에 없어서 기존 값이 유지되는 캠페인 ({csvPreview.notInCsv.length}개): {csvPreview.notInCsv.join(", ")}
-            </div>
-          )}
+          {csvPreview.notInCsv.length > 0 && (() => {
+            const willBeZeroed = csvPreview.notInCsv.filter((name) => (parseFloat(campaignBudgets[name]) || 0) > 0);
+            return (
+              <div style={{
+                fontSize: 12.5, marginBottom: 10, padding: "8px 10px", borderRadius: 6,
+                background: willBeZeroed.length > 0 ? "#2A1A12" : "transparent",
+                color: willBeZeroed.length > 0 ? "#E5894A" : "#6B7280",
+              }}>
+                {willBeZeroed.length > 0 ? (
+                  <>
+                    <AlertOctagon size={13} style={{ marginRight: 5, verticalAlign: -2 }} />
+                    <strong>{willBeZeroed.length}개 캠페인이 CSV에 없어 0원으로 설정됩니다:</strong> {willBeZeroed.join(", ")}
+                    {csvPreview.notInCsv.length > willBeZeroed.length && (
+                      <span style={{ color: "#6B7280" }}> (이미 0원이던 {csvPreview.notInCsv.length - willBeZeroed.length}개는 제외)</span>
+                    )}
+                  </>
+                ) : (
+                  <>CSV에 없는 캠페인 ({csvPreview.notInCsv.length}개, 이미 0원): {csvPreview.notInCsv.join(", ")}</>
+                )}
+              </div>
+            );
+          })()}
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={applyCsvBudgets} disabled={csvPreview.matched.length === 0} style={{
               background: csvPreview.matched.length === 0 ? "#2A2E38" : "#5B8DEF",
@@ -1234,7 +1253,7 @@ function BudgetInputPanel({ campaignList, campaignBudgets, setCampaignBudgets, c
               border: "none", borderRadius: 7, padding: "8px 16px", fontSize: 13, fontWeight: 600,
               cursor: csvPreview.matched.length === 0 ? "not-allowed" : "pointer",
             }}>
-              {csvPreview.matched.length}개 예산 적용
+              적용 ({csvPreview.matched.length}개 갱신{csvPreview.notInCsv.filter((n) => (parseFloat(campaignBudgets[n]) || 0) > 0).length > 0 ? ` · ${csvPreview.notInCsv.filter((n) => (parseFloat(campaignBudgets[n]) || 0) > 0).length}개 0원 처리` : ""})
             </button>
             <button onClick={() => setCsvPreview(null)} style={{
               background: "transparent", border: "1px solid #2A2E38", color: "#9499A6",
