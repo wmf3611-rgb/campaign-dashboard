@@ -1,6 +1,7 @@
 // ============================================================
-// campaign-dashboard v1.5 (2026-06-22)
-// 변경사항: 예산 CSV 양식 다운로드 추가, 업로드 화면에서 "최근 지표 보기" 선택 가능하도록 변경
+// campaign-dashboard v1.6 (2026-06-22)
+// 변경사항: 예산 소진율 모니터링 추가 - 상위그룹(증액 후보) 캠페인 중 최근7일 실제비용이
+// 설정 예산을 못 채우는 경우 "타겟 조정 검토" 신호 (테이블 소진율 컬럼 + 인사이트)
 // ============================================================
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import Papa from "papaparse";
@@ -11,7 +12,7 @@ import {
 import {
   Upload, AlertTriangle, TrendingUp, TrendingDown, Minus,
   CheckCircle2, Info, ChevronDown, ChevronUp,
-  DollarSign, Target, AlertOctagon, RefreshCw, Settings, ArrowLeft, Gamepad2, Download,
+  DollarSign, Target, AlertOctagon, RefreshCw, Settings, ArrowLeft, Gamepad2, Download, Gauge,
 } from "lucide-react";
 
 // ============================================================
@@ -34,6 +35,7 @@ const DEFAULT_CONFIG = {
   budgetRoundUnit: 50,
   minCampaignCostForPool: 50,
   terminationThreshold: 0.10,
+  underSpendThreshold: 0.80, // 상위그룹 캠페인의 (최근7일 실제비용/설정예산) 이 이 값보다 낮으면 타겟 조정 검토 신호
   zones: [
     { key: "big_over", label: "큰 초과", min: 0.44, max: null, rate: 0.15 },
     { key: "mid_over", label: "소폭 초과", min: 0.40, max: 0.44, rateMin: 0.05, rateMax: 0.10 },
@@ -629,6 +631,15 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
         const group = benchmark != null ? (ma7 >= benchmark ? "above" : "below") : null;
         const gap = benchmark != null ? ma7 - benchmark : null;
         const terminationFlag = ma14 != null && ma14 <= config.terminationThreshold;
+        const currentBudget = parseFloat(campaignBudgets[c]) || 0;
+
+        // 최근 7일(마지노선 포함 과거 7일) 실제 일평균 Cost -> 일 예산 소진율 계산
+        const recentDates = dateInfo.allDates.filter((d) => d <= markDate7).slice(-7);
+        const recentCosts = recentDates.map((d) => perCampaign[c][d]?.cost ?? 0);
+        const recentAvgCost = recentCosts.length > 0 ? recentCosts.reduce((a, b) => a + b, 0) / recentCosts.length : null;
+        const spendRate = (recentAvgCost != null && currentBudget > 0) ? recentAvgCost / currentBudget : null;
+        // "예산을 올릴 수 있는 캠페인(상위그룹)"이면서 소진율이 낮을 때만 타겟 조정 신호
+        const underSpendFlag = group === "above" && spendRate != null && spendRate < config.underSpendThreshold;
 
         // 캠페인별 트렌드 차트용 시계열 (날짜, 7일MA, 14일MA, 그날의 기준선)
         const chartData = dateInfo.allDates
@@ -643,8 +654,9 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
         return {
           name: c,
           ma7, ma14, group, gap, terminationFlag,
-          currentBudget: parseFloat(campaignBudgets[c]) || 0,
+          currentBudget,
           avgDailyCost: avgDailyCost[c],
+          recentAvgCost, spendRate, underSpendFlag,
           chartData,
         };
       });
@@ -725,6 +737,17 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
         list.push({
           type: "danger",
           text: `${c.name} — 14일 이동평균 D7 ROAS ${fmtPct(c.ma14)}로 종료 임계값(${fmtPct(config.terminationThreshold, 0)}) 이하입니다. 종료 검토가 필요합니다.`,
+        });
+      });
+    }
+
+    // 예산 소진 못하는 캠페인 (상위그룹 한정) -> 타겟 조정 검토
+    const underSpendCandidates = campaignAnalysis.campaigns.filter((c) => c.underSpendFlag);
+    if (underSpendCandidates.length > 0) {
+      underSpendCandidates.forEach((c) => {
+        list.push({
+          type: "warn",
+          text: `${c.name} — 기준선 이상의 효율(상위그룹)이지만, 최근 7일 평균 실제 집행액이 설정 예산의 ${fmtPct(c.spendRate, 0)}밖에 안 됩니다. 예산을 더 줘도 못 쓰는 상태일 수 있어, 추가 증액 대신 타겟팅 확장이나 입찰 전략 조정을 검토해보세요.`,
         });
       });
     }
@@ -1372,6 +1395,7 @@ function Rule2Panel({ campaignAnalysis, rule2Allocation, rule1Result, config }) 
               <th style={{ padding: "0 10px 10px" }}>그룹</th>
               <th style={{ padding: "0 10px 10px" }}>기준선 대비</th>
               <th style={{ padding: "0 10px 10px" }}>현재 예산</th>
+              <th style={{ padding: "0 10px 10px" }}>소진율</th>
               <th style={{ padding: "0 10px 10px" }}>제안 변경</th>
               <th style={{ padding: "0 0 10px 10px" }}>제안 예산</th>
             </tr>
@@ -1395,6 +1419,7 @@ function Rule2Panel({ campaignAnalysis, rule2Allocation, rule1Result, config }) 
                       >
                         {isExpanded ? <ChevronUp size={12} style={{ flexShrink: 0, color: "#5B8DEF" }} /> : <ChevronDown size={12} style={{ flexShrink: 0, color: "#5D6270" }} />}
                         {c.terminationFlag && <AlertOctagon size={13} color="#A4262C" style={{ flexShrink: 0 }} />}
+                        {c.underSpendFlag && <Gauge size={13} color="#B7791F" style={{ flexShrink: 0 }} />}
                         <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</span>
                       </button>
                     </td>
@@ -1409,6 +1434,11 @@ function Rule2Panel({ campaignAnalysis, rule2Allocation, rule1Result, config }) 
                     </td>
                     <td style={{ padding: "10px" }} className="mono">{fmtPp(c.gap)}</td>
                     <td style={{ padding: "10px" }} className="mono">{fmtMoney(c.currentBudget)}</td>
+                    <td style={{ padding: "10px" }} className="mono">
+                      <span style={{ color: c.underSpendFlag ? "#B7791F" : "inherit", fontWeight: c.underSpendFlag ? 700 : 400 }}>
+                        {c.spendRate != null ? fmtPct(c.spendRate, 0) : "-"}
+                      </span>
+                    </td>
                     <td style={{ padding: "10px" }} className="mono">
                       <span style={{ color: alloc?.allocated > 0 ? "#1E7B45" : alloc?.allocated < 0 ? "#A4262C" : "#5D6270" }}>
                         {alloc?.allocated ? fmtMoneySigned(alloc.allocated) : "-"}
@@ -1713,6 +1743,9 @@ function RuleSettingsPage({ title, config, onSave, onResetToDefault, onClose }) 
           </SettingsRow>
           <SettingsRow label="종료 검토 임계값 (14일MA, %)">
             <PercentInput value={draft.terminationThreshold} onChange={(v) => updateField("terminationThreshold", v)} />
+          </SettingsRow>
+          <SettingsRow label="예산 소진율 경고 임계값 (%, 상위그룹 한정)">
+            <PercentInput value={draft.underSpendThreshold} onChange={(v) => updateField("underSpendThreshold", v)} />
           </SettingsRow>
         </SettingsSection>
 
