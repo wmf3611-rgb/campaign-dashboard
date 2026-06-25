@@ -1,12 +1,9 @@
 // ============================================================
-// campaign-dashboard v1.8 (2026-06-22)
-// 변경사항:
-// 1) 판단일 버그 수정 - 이전엔 "CSV 마지막 날짜가 월/목이면 그 날짜에 고정"되는 버그가 있어서
-//    데이터를 갱신해도 판단일/마지노선이 안 바뀌는 문제가 있었음.
-// 2) 운영 방식 변경 - 월/목 사이클 제거, 판단일 = 항상 오늘(매일 자동 갱신). 캠페인별 판단도 동일하게 매일 갱신됨.
-// 3) 안정성 배수(직전 판단 대비 변화량 감쇄) 로직 전체 제거 - 매일 체크 방식에서는 불필요
-// 4) 캠페인 추이 차트에도 마지노선 표시선 추가
-// 5) 화면 헤더에 버전/업데이트일 표기 추가
+// campaign-dashboard v1.9 (2026-06-25)
+// 변경사항: 판단일 고정 버그 재수정 - v1.8에서 "판단일=오늘"로 고쳤지만,
+// 이전에 저장돼있던 수동 지정값(decisionDateOverride)이 영구 저장되어 계속 우선시되는
+// 문제가 남아있었음. 이제 판단일 수동 지정은 저장소에 저장하지 않고 화면을 보는 동안에만
+// 유지되도록 변경 - 새로고침/재접속하면 항상 오늘 날짜로 돌아감 (캠페인 분석도 동일 적용)
 // ============================================================
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import Papa from "papaparse";
@@ -23,8 +20,8 @@ import {
 // ============================================================
 // 앱 버전 정보 — 업데이트할 때마다 여기 한 곳만 바꾸면 화면에도 자동 반영됨
 // ============================================================
-const APP_VERSION = "v1.8";
-const APP_UPDATED_AT = "2026-06-22";
+const APP_VERSION = "v1.9";
+const APP_UPDATED_AT = "2026-06-25";
 
 // ============================================================
 // 타이틀 정의
@@ -274,16 +271,14 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
     setConfig(DEFAULT_CONFIG); setSavedUploadCache(null);
 
     (async () => {
-      const [savedBudgets, savedUpload, savedDecisionDate, savedConfig] = await Promise.all([
+      const [savedBudgets, savedUpload, savedConfig] = await Promise.all([
         loadFromStorage(keys.budgets),
         loadFromStorage(keys.upload),
-        loadFromStorage(keys.decisionDate),
         loadFromStorage(keys.ruleConfig),
       ]);
       if (cancelled) return;
 
       if (savedBudgets) setCampaignBudgets(savedBudgets);
-      if (savedDecisionDate?.value) setDecisionDateOverride(savedDecisionDate.value);
       if (savedConfig) setConfig({ ...DEFAULT_CONFIG, ...savedConfig });
       // 곧바로 화면에 적용하지 않고, "최근 지표 보기" 버튼을 위해 캐시만 보관
       if (savedUpload?.rawRows && savedUpload?.mapping) {
@@ -322,12 +317,9 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
     debouncedSaveBudgets(campaignBudgets);
   }, [campaignBudgets, isLoadingShared, debouncedSaveBudgets]);
 
-  // ---------- 판단일 override 변경 시 저장 ----------
-  useEffect(() => {
-    if (isLoadingShared) return;
-    if (!decisionDateOverride) return;
-    saveToStorage(keys.decisionDate, { value: decisionDateOverride });
-  }, [decisionDateOverride, isLoadingShared, keys]);
+  // 판단일(decisionDateOverride)은 더 이상 저장소에 영구 저장하지 않음.
+  // 화면을 새로고침하거나 다시 들어오면 항상 "오늘"로 돌아가야 하므로,
+  // 수동 지정값은 이 화면을 보고 있는 동안(메모리)에만 유지됨.
 
   // ---------- 룰 설정 변경 시 저장 (설정 페이지에서 호출) ----------
   const handleSaveConfig = useCallback(async (newConfig) => {
