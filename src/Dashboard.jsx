@@ -1,7 +1,12 @@
 // ============================================================
-// campaign-dashboard v1.7 (2026-06-22)
-// 변경사항: 예산 CSV 일괄 적용 시, CSV에 없는 기존 캠페인은 0원으로 자동 처리
-// (운영 종료로 간주). 미리보기에서 실제로 0원이 될 캠페인만 강조 경고.
+// campaign-dashboard v1.8 (2026-06-22)
+// 변경사항:
+// 1) 판단일 버그 수정 - 이전엔 "CSV 마지막 날짜가 월/목이면 그 날짜에 고정"되는 버그가 있어서
+//    데이터를 갱신해도 판단일/마지노선이 안 바뀌는 문제가 있었음.
+// 2) 운영 방식 변경 - 월/목 사이클 제거, 판단일 = 항상 오늘(매일 자동 갱신). 캠페인별 판단도 동일하게 매일 갱신됨.
+// 3) 안정성 배수(직전 판단 대비 변화량 감쇄) 로직 전체 제거 - 매일 체크 방식에서는 불필요
+// 4) 캠페인 추이 차트에도 마지노선 표시선 추가
+// 5) 화면 헤더에 버전/업데이트일 표기 추가
 // ============================================================
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import Papa from "papaparse";
@@ -10,10 +15,16 @@ import {
   ResponsiveContainer, ReferenceLine, Legend,
 } from "recharts";
 import {
-  Upload, AlertTriangle, TrendingUp, TrendingDown, Minus,
+  Upload, AlertTriangle,
   CheckCircle2, Info, ChevronDown, ChevronUp,
   DollarSign, Target, AlertOctagon, RefreshCw, Settings, ArrowLeft, Gamepad2, Download, Gauge,
 } from "lucide-react";
+
+// ============================================================
+// 앱 버전 정보 — 업데이트할 때마다 여기 한 곳만 바꾸면 화면에도 자동 반영됨
+// ============================================================
+const APP_VERSION = "v1.8";
+const APP_UPDATED_AT = "2026-06-22";
 
 // ============================================================
 // 타이틀 정의
@@ -69,14 +80,6 @@ function getZone(roas, config) {
     }
   }
   return zones[zones.length - 1];
-}
-
-function stabilityMultiplier(deltaPp) {
-  if (deltaPp == null || isNaN(deltaPp)) return { mult: 1.0, label: "기준없음" };
-  const d = Math.abs(deltaPp) * 100;
-  if (d <= 5) return { mult: 1.0, label: "안정" };
-  if (d <= 10) return { mult: 0.6, label: "흔들림" };
-  return { mult: 0.3, label: "급변" };
 }
 
 function roundToUnit(amount, unit) {
@@ -463,25 +466,14 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
     return { minDate, maxDate, allDates: buildDateRange(minDate, maxDate) };
   }, [parsedData]);
 
-  // ---------- 판단 시점 계산 (가장 최근 월/목, 또는 override) ----------
+  // ---------- 판단 시점 = 항상 오늘 (매일 갱신, override로 수동 지정도 가능) ----------
   const decisionDate = useMemo(() => {
-    if (!dateInfo) return null;
     if (decisionDateOverride) return decisionDateOverride;
-    // maxDate 기준 다음 월요일 또는 목요일 찾기 (오늘 이후 가장 가까운 월/목)
-    let cur = new Date(dateInfo.maxDate);
-    for (let i = 0; i < 7; i++) {
-      const wd = cur.getDay();
-      if (wd === 1 || wd === 4) {
-        return cur.toISOString().slice(0, 10);
-      }
-      cur.setDate(cur.getDate() + 1);
-    }
-    return dateInfo.maxDate;
-  }, [dateInfo, decisionDateOverride]);
+    return new Date().toISOString().slice(0, 10);
+  }, [decisionDateOverride]);
 
   const markDate7 = decisionDate ? addDays(decisionDate, -8) : null; // 7일 이동평균용 마지노선
   const markDate14 = decisionDate ? addDays(decisionDate, -8) : null; // 14일도 동일 마지노선 기준
-  const prevDecisionDate = decisionDate ? addDays(decisionDate, -3) : null; // 근사치, 아래서 실제 보정
 
   // ---------- 1번 룰: Blended ROAS 계산 ----------
   const blendedAnalysis = useMemo(() => {
@@ -528,23 +520,15 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
     const currentMa = blendedAnalysis.ma7[markDate7];
     if (currentMa == null) return { insufficient: true };
 
-    // 직전 판단 시점 찾기 (decisionPoints 중 decisionDate 바로 이전 것)
-    const dp = blendedAnalysis.decisionPoints.filter((d) => d < decisionDate);
-    const prevDecision = dp.length > 0 ? dp[dp.length - 1] : null;
-    const prevMark = prevDecision ? addDays(prevDecision, -8) : null;
-    const prevMa = prevMark ? blendedAnalysis.ma7[prevMark] : null;
-
     const zone = getZone(currentMa, config);
-    const deltaPp = prevMa != null ? currentMa - prevMa : null;
-    const stability = stabilityMultiplier(deltaPp);
-    const finalRate = zone.rate * stability.mult;
+    const finalRate = zone.rate;
 
     return {
       insufficient: false,
-      currentMa, prevMa, deltaPp, zone, stability, finalRate,
-      markDate7, prevMark,
+      currentMa, zone, finalRate,
+      markDate7,
     };
-  }, [blendedAnalysis, markDate7, decisionDate, config]);
+  }, [blendedAnalysis, markDate7, config]);
 
   // 전체 현재 운영예산 = 캠페인별 입력 예산 합계
   const currentTotalBudget = useMemo(() => {
@@ -707,20 +691,6 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
     if (!rule1Result || rule1Result.insufficient || !campaignAnalysis) return [];
     const list = [];
 
-    // 추세 코멘트
-    if (rule1Result.deltaPp != null) {
-      if (Math.abs(rule1Result.deltaPp) > 0.10) {
-        list.push({
-          type: "warn",
-          text: `전체 Blended ROAS가 직전 판단 대비 ${fmtPp(rule1Result.deltaPp)}로 크게 변동했습니다. 안정성 배수(×${rule1Result.stability.mult})가 적용되어 기본 조정폭이 약화되었습니다.`,
-        });
-      } else if (rule1Result.deltaPp > 0.03) {
-        list.push({ type: "good", text: `전체 ROAS가 직전 대비 ${fmtPp(rule1Result.deltaPp)} 개선되는 추세입니다.` });
-      } else if (rule1Result.deltaPp < -0.03) {
-        list.push({ type: "warn", text: `전체 ROAS가 직전 대비 ${fmtPp(rule1Result.deltaPp)} 하락하는 추세입니다.` });
-      }
-    }
-
     // D14 데이터 가용성 안내
     const hasAnyD14 = campaignAnalysis.campaigns.some((c) => c.ma14 != null);
     if (!hasAnyD14) {
@@ -851,6 +821,7 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
               rule2Allocation={rule2Allocation}
               rule1Result={rule1Result}
               config={config}
+              markDate7={markDate7}
             />
 
             <InsightsPanel
@@ -900,12 +871,17 @@ function Header({ title, onBack, onOpenSettings, fileName, parsedData, dateInfo,
           }}>
             <ArrowLeft size={14} /> 타이틀 선택으로
           </button>
-          <button onClick={onOpenSettings} style={{
-            display: "flex", alignItems: "center", gap: 6, background: "#161A22", border: "1px solid #2A2E38",
-            color: "#9499A6", fontSize: 12.5, cursor: "pointer", padding: "6px 12px", borderRadius: 7,
-          }}>
-            <Settings size={13} /> 룰 설정
-          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <span className="mono" style={{ fontSize: 11, color: "#3D4250" }}>
+              {APP_VERSION} · {APP_UPDATED_AT} 업데이트
+            </span>
+            <button onClick={onOpenSettings} style={{
+              display: "flex", alignItems: "center", gap: 6, background: "#161A22", border: "1px solid #2A2E38",
+              color: "#9499A6", fontSize: 12.5, cursor: "pointer", padding: "6px 12px", borderRadius: 7,
+            }}>
+              <Settings size={13} /> 룰 설정
+            </button>
+          </div>
         </div>
         <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
           <div>
@@ -927,7 +903,7 @@ function Header({ title, onBack, onOpenSettings, fileName, parsedData, dateInfo,
         {parsedData && decisionDate && (
           <div style={{ marginTop: 16, display: "flex", alignItems: "center", gap: 10, fontSize: 13, flexWrap: "wrap" }}>
             <Target size={14} color="#5B8DEF" />
-            <span style={{ color: "#9499A6" }}>판단 기준일 (월/목 사이클)</span>
+            <span style={{ color: "#9499A6" }}>판단 기준일</span>
             <input
               type="date"
               value={decisionDate}
@@ -938,7 +914,7 @@ function Header({ title, onBack, onOpenSettings, fileName, parsedData, dateInfo,
                 color: "#E8E9ED", padding: "5px 10px", fontSize: 13,
               }}
             />
-            <span style={{ color: "#5D6270", fontSize: 12 }}>* 자동으로 데이터 마지막날 이후 가장 가까운 월/목으로 설정됨. 필요시 수정 가능</span>
+            <span style={{ color: "#5D6270", fontSize: 12 }}>* 기본값은 오늘 날짜(매일 자동 갱신). 필요시 수정 가능</span>
             {syncLabel && (
               <span style={{ marginLeft: "auto", fontSize: 11.5, color: syncColor, display: "flex", alignItems: "center", gap: 5 }}>
                 <span style={{ width: 6, height: 6, borderRadius: "50%", background: syncColor, display: "inline-block" }} />
@@ -1302,8 +1278,7 @@ function Rule1Panel({ rule1Result, rule1Budget, currentTotalBudget, blendedAnaly
     );
   }
 
-  const { currentMa, prevMa, deltaPp, zone, stability, finalRate } = rule1Result;
-  const TrendIcon = deltaPp == null ? Minus : deltaPp > 0.01 ? TrendingUp : deltaPp < -0.01 ? TrendingDown : Minus;
+  const { currentMa, zone, finalRate } = rule1Result;
 
   return (
     <SectionCard
@@ -1317,17 +1292,11 @@ function Rule1Panel({ rule1Result, rule1Budget, currentTotalBudget, blendedAnaly
           <MetricBox label="Blended D7 ROAS (7일 이동평균)" value={fmtPct(currentMa)} accent={zone.color} />
           <MetricBox label={`목표(${fmtPct(config.targetRoas, 0)}) 대비`} value={fmtPp(currentMa - config.targetRoas)} accent={currentMa >= config.targetRoas ? "#1E7B45" : "#A4262C"} />
           <MetricBox label="구간" value={zone.label} accent={zone.color} />
-          <MetricBox
-            label="직전 판단 대비"
-            value={prevMa != null ? fmtPp(deltaPp) : "데이터없음"}
-            icon={<TrendIcon size={14} />}
-            accent={stability.label === "급변" ? "#C9622B" : stability.label === "흔들림" ? "#B7791F" : "#6B7280"}
-          />
+          <MetricBox label="마지노선(성숙데이터)" value={markDate7} />
         </div>
 
         <div style={{ background: "#161A22", borderRadius: 10, padding: 18, display: "flex", flexDirection: "column", gap: 10 }}>
           <Row label="기본 조정 (구간표)" value={fmtPct(zone.rate, 1)} />
-          <Row label="안정성 배수" value={`×${stability.mult} (${stability.label})`} />
           <Row label="최종 조정률" value={fmtPct(finalRate, 2)} bold />
           <div style={{ height: 1, background: "#23262E", margin: "4px 0" }} />
           <Row label="현재 운영 예산" value={fmtMoney(currentTotalBudget)} />
@@ -1381,7 +1350,7 @@ function Rule1Panel({ rule1Result, rule1Budget, currentTotalBudget, blendedAnaly
   );
 }
 
-function Rule2Panel({ campaignAnalysis, rule2Allocation, rule1Result, config }) {
+function Rule2Panel({ campaignAnalysis, rule2Allocation, rule1Result, config, markDate7 }) {
   const [open, setOpen] = useState(true);
   const [expandedCampaign, setExpandedCampaign] = useState(null);
   if (!campaignAnalysis) return null;
@@ -1468,7 +1437,7 @@ function Rule2Panel({ campaignAnalysis, rule2Allocation, rule1Result, config }) 
                   {isExpanded && (
                     <tr>
                       <td colSpan={8} style={{ padding: "4px 0 18px 0", background: "#0F1115" }}>
-                        <CampaignTrendChart campaign={c} config={config} />
+                        <CampaignTrendChart campaign={c} config={config} markDate7={markDate7} />
                       </td>
                     </tr>
                   )}
@@ -1489,11 +1458,13 @@ function Rule2Panel({ campaignAnalysis, rule2Allocation, rule1Result, config }) 
 }
 
 // 캠페인명 클릭 시 펼쳐지는 D7/D14 ROAS 추이 차트
-function CampaignTrendChart({ campaign, config }) {
+function CampaignTrendChart({ campaign, config, markDate7 }) {
   if (!campaign.chartData || campaign.chartData.length < 2) {
     return <EmptyNote text="추이를 그릴 데이터가 충분하지 않습니다 (최소 며칠치 이동평균 데이터 필요)." />;
   }
   const hasD14 = campaign.chartData.some((d) => d.ma14 != null);
+  const markLabel = markDate7 ? markDate7.slice(5) : null;
+  const markInRange = markLabel && campaign.chartData.some((d) => d.date === markLabel);
   return (
     <div style={{ padding: "10px 0 0 0" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 10, fontSize: 11.5, flexWrap: "wrap" }}>
@@ -1501,6 +1472,7 @@ function CampaignTrendChart({ campaign, config }) {
         <LegendDot color="#5B8DEF" label="7일 이동평균 ROAS" />
         {hasD14 && <LegendDot color="#E5894A" label="14일 이동평균 ROAS" dashed />}
         <LegendDot color="#5D6270" label="유료 전체 평균(기준선)" dashed />
+        {markInRange && <LegendDot color="#C9622B" label={`마지노선 ${markDate7}`} dashed />}
       </div>
       <div style={{ height: 200 }}>
         <ResponsiveContainer width="100%" height="100%">
@@ -1517,6 +1489,15 @@ function CampaignTrendChart({ campaign, config }) {
               labelStyle={{ color: "#9499A6" }}
               formatter={(v, name) => [v == null ? "-" : `${(v * 100).toFixed(1)}%`, name]}
             />
+            {markInRange && (
+              <ReferenceLine
+                x={markLabel}
+                stroke="#C9622B"
+                strokeWidth={1.5}
+                strokeDasharray="4 3"
+                label={{ value: "마지노선", position: "top", fill: "#C9622B", fontSize: 10 }}
+              />
+            )}
             <Line type="monotone" dataKey="benchmark" name="기준선" stroke="#5D6270" strokeWidth={1.3} strokeDasharray="4 3" dot={false} />
             {hasD14 && <Line type="monotone" dataKey="ma14" name="14일MA" stroke="#E5894A" strokeWidth={1.6} strokeDasharray="4 3" dot={false} connectNulls />}
             <Line type="monotone" dataKey="ma7" name="7일MA" stroke="#5B8DEF" strokeWidth={2.2} dot={false} connectNulls />
@@ -1679,6 +1660,11 @@ function TitleSelector({ onSelect }) {
               </div>
             </button>
           ))}
+        </div>
+        <div style={{ textAlign: "center", marginTop: 36 }}>
+          <span style={{ fontFamily: "'IBM Plex Mono', 'JetBrains Mono', monospace", fontSize: 11, color: "#3D4250" }}>
+            {APP_VERSION} · {APP_UPDATED_AT} 업데이트
+          </span>
         </div>
       </div>
     </div>
