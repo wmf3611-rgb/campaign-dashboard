@@ -1,9 +1,12 @@
 // ============================================================
-// campaign-dashboard v1.9 (2026-06-25)
-// 변경사항: 판단일 고정 버그 재수정 - v1.8에서 "판단일=오늘"로 고쳤지만,
-// 이전에 저장돼있던 수동 지정값(decisionDateOverride)이 영구 저장되어 계속 우선시되는
-// 문제가 남아있었음. 이제 판단일 수동 지정은 저장소에 저장하지 않고 화면을 보는 동안에만
-// 유지되도록 변경 - 새로고침/재접속하면 항상 오늘 날짜로 돌아감 (캠페인 분석도 동일 적용)
+// campaign-dashboard v1.11 (2026-06-25)
+// 변경사항:
+// 1) "마지노선" 용어를 "데이터 기준일"로 전체 변경 (그래프/패널 텍스트 포함).
+// 2) 전체 예산 룰(1번) 차트에 "일별 실제 D7 ROAS" / "일별 실제 D14 ROAS" 라인 추가.
+//    D14는 업로드 파일에 D14 매출 데이터가 전혀 없으면 토글/라인 자체를 노출하지 않음.
+// 3) 차트 상단 범례를 클릭해서 지표(7일 이동평균 / 실제 D7 / 실제 D14)를 on/off 가능하게 함.
+// 4) 기준일 표시용 ReferenceLine 라벨이 차트 가장자리에서 잘리는 문제 수정
+//    (라인의 좌/우 위치에 따라 라벨이 항상 차트 안쪽으로 들어오도록 자동 보정 + 상단 여백 확보).
 // ============================================================
 import React, { useState, useMemo, useCallback, useEffect } from "react";
 import Papa from "papaparse";
@@ -20,7 +23,7 @@ import {
 // ============================================================
 // 앱 버전 정보 — 업데이트할 때마다 여기 한 곳만 바꾸면 화면에도 자동 반영됨
 // ============================================================
-const APP_VERSION = "v1.9";
+const APP_VERSION = "v1.11";
 const APP_UPDATED_AT = "2026-06-25";
 
 // ============================================================
@@ -464,8 +467,8 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
     return new Date().toISOString().slice(0, 10);
   }, [decisionDateOverride]);
 
-  const markDate7 = decisionDate ? addDays(decisionDate, -8) : null; // 7일 이동평균용 마지노선
-  const markDate14 = decisionDate ? addDays(decisionDate, -8) : null; // 14일도 동일 마지노선 기준
+  const markDate7 = decisionDate ? addDays(decisionDate, -8) : null; // 7일 이동평균용 데이터 기준일
+  const markDate14 = decisionDate ? addDays(decisionDate, -8) : null; // 14일도 동일 데이터 기준일 적용
 
   // ---------- 1번 룰: Blended ROAS 계산 ----------
   const blendedAnalysis = useMemo(() => {
@@ -475,12 +478,20 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
     const organicByDate = {};
     parsedData.forEach((r) => {
       const bucket = r.campaign ? paidByDate : organicByDate;
-      if (!bucket[r.date]) bucket[r.date] = { cost: 0, rev7: 0 };
+      if (!bucket[r.date]) bucket[r.date] = { cost: 0, rev7: 0, rev14: 0, has14: false };
       bucket[r.date].cost += r.cost;
       bucket[r.date].rev7 += r.rev7;
+      if (r.rev14 != null) {
+        bucket[r.date].rev14 += r.rev14;
+        bucket[r.date].has14 = true;
+      }
     });
 
-    const roasSeries = {};
+    // 업로드 파일 전체에 D14 매출 데이터가 존재하는지 (없으면 D14 관련 항목 자체를 노출하지 않음)
+    const hasAnyD14 = parsedData.some((r) => r.rev14 != null);
+
+    const roasSeries = {}; // 일별 실제(raw) D7 블렌디드 ROAS
+    const roasSeries14 = {}; // 일별 실제(raw) D14 블렌디드 ROAS
     dateInfo.allDates.forEach((d) => {
       const paid = paidByDate[d];
       const organicRev = organicByDate[d]?.rev7 || 0;
@@ -488,6 +499,18 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
         roasSeries[d] = (paid.rev7 + organicRev) / paid.cost;
       } else {
         roasSeries[d] = null;
+      }
+
+      if (!hasAnyD14) {
+        roasSeries14[d] = null;
+        return;
+      }
+      const paid14has = paid?.has14 || organicByDate[d]?.has14;
+      if (paid && paid.cost > 0 && paid14has) {
+        const organicRev14 = organicByDate[d]?.rev14 || 0;
+        roasSeries14[d] = (paid.rev14 + organicRev14) / paid.cost;
+      } else {
+        roasSeries14[d] = null;
       }
     });
 
@@ -499,12 +522,18 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
       return wd === 1 || wd === 4;
     });
 
-    // 차트용 시리즈
+    // 차트용 시리즈 — 7일 이동평균 / 일별 실제 D7 ROAS / 일별 실제 D14 ROAS(데이터 있을 때만)
+    // 셋 중 하나라도 값이 있는 날짜만 포함 (전부 비어있는 행은 만들지 않음)
     const chartData = dateInfo.allDates
-      .filter((d) => ma7[d] != null)
-      .map((d) => ({ date: d.slice(5), value: ma7[d] }));
+      .filter((d) => ma7[d] != null || roasSeries[d] != null || roasSeries14[d] != null)
+      .map((d) => ({
+        date: d.slice(5),
+        value: ma7[d],
+        roas7: roasSeries[d],
+        roas14: hasAnyD14 ? roasSeries14[d] : null,
+      }));
 
-    return { paidByDate, organicByDate, roasSeries, ma7, decisionPoints, chartData };
+    return { paidByDate, organicByDate, roasSeries, roasSeries14, ma7, decisionPoints, chartData, hasAnyD14 };
   }, [parsedData, dateInfo]);
 
   const rule1Result = useMemo(() => {
@@ -609,10 +638,11 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
         const terminationFlag = ma14 != null && ma14 <= config.terminationThreshold;
         const currentBudget = parseFloat(campaignBudgets[c]) || 0;
 
-        // 최근 7일(마지노선 포함 과거 7일) 실제 일평균 Cost -> 일 예산 소진율 계산
+        // 최근 7일(데이터 기준일 포함 과거 7일) 실제 Cost -> 일평균(소진율 계산용) + 누적(참고 표시용)
         const recentDates = dateInfo.allDates.filter((d) => d <= markDate7).slice(-7);
         const recentCosts = recentDates.map((d) => perCampaign[c][d]?.cost ?? 0);
-        const recentAvgCost = recentCosts.length > 0 ? recentCosts.reduce((a, b) => a + b, 0) / recentCosts.length : null;
+        const recentSumCost = recentCosts.length > 0 ? recentCosts.reduce((a, b) => a + b, 0) : null;
+        const recentAvgCost = recentCosts.length > 0 ? recentSumCost / recentCosts.length : null;
         const spendRate = (recentAvgCost != null && currentBudget > 0) ? recentAvgCost / currentBudget : null;
         // "예산을 올릴 수 있는 캠페인(상위그룹)"이면서 소진율이 낮을 때만 타겟 조정 신호
         const underSpendFlag = group === "above" && spendRate != null && spendRate < config.underSpendThreshold;
@@ -632,7 +662,7 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
           ma7, ma14, group, gap, terminationFlag,
           currentBudget,
           avgDailyCost: avgDailyCost[c],
-          recentAvgCost, spendRate, underSpendFlag,
+          recentAvgCost, recentSumCost, recentDaysCount: recentCosts.length, spendRate, underSpendFlag,
           chartData,
         };
       });
@@ -1260,22 +1290,30 @@ function BudgetInputPanel({ campaignList, campaignBudgets, setCampaignBudgets, c
 
 function Rule1Panel({ rule1Result, rule1Budget, currentTotalBudget, blendedAnalysis, decisionDate, markDate7, config }) {
   const [open, setOpen] = useState(true);
+  // 차트에 표시할 지표 on/off 상태 (범례 클릭으로 토글)
+  const [visible, setVisible] = useState({ ma7: true, roas7: true, roas14: true });
+  const toggle = (key) => setVisible((v) => ({ ...v, [key]: !v[key] }));
+
   if (!rule1Result) return null;
 
   if (rule1Result.insufficient) {
     return (
       <SectionCard title="1. 전체 예산 룰" icon={<Target size={16} color="#5B8DEF" />} open={open} onToggle={() => setOpen(o=>!o)}>
-        <EmptyNote text={`판단 기준일(마지노선 ${markDate7})에 7일 이동평균을 계산할 데이터가 부족합니다. 최소 7일 이상의 데이터가 필요합니다.`} />
+        <EmptyNote text={`판단 기준일(데이터 기준일 ${markDate7})에 7일 이동평균을 계산할 데이터가 부족합니다. 최소 7일 이상의 데이터가 필요합니다.`} />
       </SectionCard>
     );
   }
 
   const { currentMa, zone, finalRate } = rule1Result;
+  const hasD14 = !!blendedAnalysis?.hasAnyD14;
+  const markLabel = markDate7 ? markDate7.slice(5) : null;
+  const markInRange = markLabel && blendedAnalysis?.chartData?.some((d) => d.date === markLabel);
+  const refLinePosition = markInRange ? getRefLineLabelPosition(blendedAnalysis.chartData, markLabel) : "insideTopLeft";
 
   return (
     <SectionCard
       title="1. 전체 예산 룰"
-      subtitle={`판단일 ${decisionDate} · 마지노선(성숙데이터) ${markDate7}`}
+      subtitle={`판단일 ${decisionDate} · 데이터 기준일(성숙 데이터) ${markDate7}`}
       icon={<Target size={16} color="#5B8DEF" />}
       open={open} onToggle={() => setOpen((o) => !o)}
     >
@@ -1284,7 +1322,7 @@ function Rule1Panel({ rule1Result, rule1Budget, currentTotalBudget, blendedAnaly
           <MetricBox label="Blended D7 ROAS (7일 이동평균)" value={fmtPct(currentMa)} accent={zone.color} />
           <MetricBox label={`목표(${fmtPct(config.targetRoas, 0)}) 대비`} value={fmtPp(currentMa - config.targetRoas)} accent={currentMa >= config.targetRoas ? "#1E7B45" : "#A4262C"} />
           <MetricBox label="구간" value={zone.label} accent={zone.color} />
-          <MetricBox label="마지노선(성숙데이터)" value={markDate7} />
+          <MetricBox label="데이터 기준일(성숙 데이터)" value={markDate7} />
         </div>
 
         <div style={{ background: "#161A22", borderRadius: 10, padding: 18, display: "flex", flexDirection: "column", gap: 10 }}>
@@ -1300,16 +1338,21 @@ function Rule1Panel({ rule1Result, rule1Budget, currentTotalBudget, blendedAnaly
 
       {blendedAnalysis?.chartData?.length > 1 && (
         <div style={{ marginTop: 22 }}>
-          <div style={{ fontSize: 11.5, color: "#6B7280", marginBottom: 10, display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
-            <span>Blended D7 ROAS — 7일 이동평균 추이</span>
-            <span style={{ display: "flex", alignItems: "center", gap: 5, color: "#9499A6" }}>
+          <div style={{ fontSize: 11.5, color: "#6B7280", marginBottom: 10, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span style={{ marginRight: 4 }}>Blended ROAS 추이 — 지표 클릭으로 표시/숨김</span>
+            <ToggleLegendDot color="#5B8DEF" label="7일 이동평균 ROAS" active={visible.ma7} onClick={() => toggle("ma7")} />
+            <ToggleLegendDot color="#3DBE8B" label="일별 실제 D7 ROAS" dashed active={visible.roas7} onClick={() => toggle("roas7")} />
+            {hasD14 && (
+              <ToggleLegendDot color="#E5894A" label="일별 실제 D14 ROAS" dashed active={visible.roas14} onClick={() => toggle("roas14")} />
+            )}
+            <span style={{ display: "flex", alignItems: "center", gap: 5, color: "#9499A6", marginLeft: 4 }}>
               <span style={{ width: 14, height: 0, borderTop: "1.5px dashed #C9622B", display: "inline-block" }} />
-              마지노선(판단 기준 데이터) {markDate7}
+              데이터 기준일 {markDate7}
             </span>
           </div>
-          <div style={{ height: 220 }}>
+          <div style={{ height: 240 }}>
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={blendedAnalysis.chartData} margin={{ top: 6, right: 12, bottom: 0, left: -10 }}>
+              <LineChart data={blendedAnalysis.chartData} margin={{ top: 20, right: 12, bottom: 0, left: -10 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#23262E" vertical={false} />
                 <XAxis dataKey="date" tick={{ fontSize: 11, fill: "#6B7280" }} axisLine={{ stroke: "#23262E" }} tickLine={false} />
                 <YAxis
@@ -1320,19 +1363,21 @@ function Rule1Panel({ rule1Result, rule1Budget, currentTotalBudget, blendedAnaly
                 <Tooltip
                   contentStyle={{ background: "#1A1D24", border: "1px solid #2A2E38", borderRadius: 8, fontSize: 12 }}
                   labelStyle={{ color: "#9499A6" }}
-                  formatter={(v) => [`${(v * 100).toFixed(1)}%`, "ROAS"]}
+                  formatter={(v, name) => [v == null ? "-" : `${(v * 100).toFixed(1)}%`, name]}
                 />
                 <ReferenceLine y={config.targetRoas} stroke="#5D6270" strokeDasharray="4 4" label={{ value: `목표 ${fmtPct(config.targetRoas, 0)}`, position: "insideTopRight", fill: "#6B7280", fontSize: 11 }} />
-                {markDate7 && blendedAnalysis.chartData.some((d) => d.date === markDate7.slice(5)) && (
+                {markInRange && (
                   <ReferenceLine
-                    x={markDate7.slice(5)}
+                    x={markLabel}
                     stroke="#C9622B"
                     strokeWidth={1.5}
                     strokeDasharray="4 3"
-                    label={{ value: "마지노선", position: "top", fill: "#C9622B", fontSize: 11 }}
+                    label={{ value: "기준일", position: refLinePosition, fill: "#C9622B", fontSize: 11 }}
                   />
                 )}
-                <Line type="monotone" dataKey="value" stroke="#5B8DEF" strokeWidth={2.2} dot={false} />
+                {visible.roas7 && <Line type="monotone" dataKey="roas7" name="일별 실제 D7 ROAS" stroke="#3DBE8B" strokeWidth={1.3} strokeDasharray="4 3" dot={false} connectNulls />}
+                {hasD14 && visible.roas14 && <Line type="monotone" dataKey="roas14" name="일별 실제 D14 ROAS" stroke="#E5894A" strokeWidth={1.3} strokeDasharray="4 3" dot={false} connectNulls />}
+                {visible.ma7 && <Line type="monotone" dataKey="value" name="7일 이동평균 ROAS" stroke="#5B8DEF" strokeWidth={2.2} dot={false} connectNulls />}
               </LineChart>
             </ResponsiveContainer>
           </div>
@@ -1375,6 +1420,7 @@ function Rule2Panel({ campaignAnalysis, rule2Allocation, rule1Result, config, ma
               <th style={{ padding: "0 10px 10px" }}>그룹</th>
               <th style={{ padding: "0 10px 10px" }}>기준선 대비</th>
               <th style={{ padding: "0 10px 10px" }}>현재 예산</th>
+              <th style={{ padding: "0 10px 10px" }}>최근7일 코스트</th>
               <th style={{ padding: "0 10px 10px" }}>소진율</th>
               <th style={{ padding: "0 10px 10px" }}>제안 변경</th>
               <th style={{ padding: "0 0 10px 10px" }}>제안 예산</th>
@@ -1414,6 +1460,10 @@ function Rule2Panel({ campaignAnalysis, rule2Allocation, rule1Result, config, ma
                     </td>
                     <td style={{ padding: "10px" }} className="mono">{fmtPp(c.gap)}</td>
                     <td style={{ padding: "10px" }} className="mono">{fmtMoney(c.currentBudget)}</td>
+                    <td style={{ padding: "10px" }} className="mono" title={c.recentDaysCount < 7 ? `최근 ${c.recentDaysCount}일 합산 (데이터 7일 미만)` : "최근 7일 합산"}>
+                      {c.recentSumCost != null ? fmtMoney(c.recentSumCost) : "-"}
+                      {c.recentDaysCount < 7 && <span style={{ color: "#5D6270", fontSize: 10.5 }}> ({c.recentDaysCount}일)</span>}
+                    </td>
                     <td style={{ padding: "10px" }} className="mono">
                       <span style={{ color: c.underSpendFlag ? "#B7791F" : "inherit", fontWeight: c.underSpendFlag ? 700 : 400 }}>
                         {c.spendRate != null ? fmtPct(c.spendRate, 0) : "-"}
@@ -1428,7 +1478,7 @@ function Rule2Panel({ campaignAnalysis, rule2Allocation, rule1Result, config, ma
                   </tr>
                   {isExpanded && (
                     <tr>
-                      <td colSpan={8} style={{ padding: "4px 0 18px 0", background: "#0F1115" }}>
+                      <td colSpan={10} style={{ padding: "4px 0 18px 0", background: "#0F1115" }}>
                         <CampaignTrendChart campaign={c} config={config} markDate7={markDate7} />
                       </td>
                     </tr>
@@ -1457,6 +1507,7 @@ function CampaignTrendChart({ campaign, config, markDate7 }) {
   const hasD14 = campaign.chartData.some((d) => d.ma14 != null);
   const markLabel = markDate7 ? markDate7.slice(5) : null;
   const markInRange = markLabel && campaign.chartData.some((d) => d.date === markLabel);
+  const refLinePosition = markInRange ? getRefLineLabelPosition(campaign.chartData, markLabel) : "insideTopLeft";
   return (
     <div style={{ padding: "10px 0 0 0" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 10, fontSize: 11.5, flexWrap: "wrap" }}>
@@ -1464,11 +1515,11 @@ function CampaignTrendChart({ campaign, config, markDate7 }) {
         <LegendDot color="#5B8DEF" label="7일 이동평균 ROAS" />
         {hasD14 && <LegendDot color="#E5894A" label="14일 이동평균 ROAS" dashed />}
         <LegendDot color="#5D6270" label="유료 전체 평균(기준선)" dashed />
-        {markInRange && <LegendDot color="#C9622B" label={`마지노선 ${markDate7}`} dashed />}
+        {markInRange && <LegendDot color="#C9622B" label={`데이터 기준일 ${markDate7}`} dashed />}
       </div>
       <div style={{ height: 200 }}>
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={campaign.chartData} margin={{ top: 6, right: 12, bottom: 0, left: -10 }}>
+          <LineChart data={campaign.chartData} margin={{ top: 20, right: 12, bottom: 0, left: -10 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1E2128" vertical={false} />
             <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#6B7280" }} axisLine={{ stroke: "#1E2128" }} tickLine={false} />
             <YAxis
@@ -1487,7 +1538,7 @@ function CampaignTrendChart({ campaign, config, markDate7 }) {
                 stroke="#C9622B"
                 strokeWidth={1.5}
                 strokeDasharray="4 3"
-                label={{ value: "마지노선", position: "top", fill: "#C9622B", fontSize: 10 }}
+                label={{ value: "기준일", position: refLinePosition, fill: "#C9622B", fontSize: 10 }}
               />
             )}
             <Line type="monotone" dataKey="benchmark" name="기준선" stroke="#5D6270" strokeWidth={1.3} strokeDasharray="4 3" dot={false} />
@@ -1500,12 +1551,43 @@ function CampaignTrendChart({ campaign, config, markDate7 }) {
   );
 }
 
+// 세로 기준선(ReferenceLine) 라벨이 차트의 좌/우 끝에 걸렸을 때 잘리지 않도록,
+// 기준선의 위치가 데이터 구간의 앞쪽/뒤쪽 중 어디인지에 따라 라벨을 반대 방향으로 붙여줌
+function getRefLineLabelPosition(chartData, targetLabel) {
+  const idx = chartData.findIndex((d) => d.date === targetLabel);
+  if (idx === -1) return "insideTopLeft";
+  const ratio = idx / Math.max(chartData.length - 1, 1);
+  return ratio > 0.5 ? "insideTopLeft" : "insideTopRight";
+}
+
 function LegendDot({ color, label, dashed }) {
   return (
     <span style={{ display: "flex", alignItems: "center", gap: 5, color: "#9499A6" }}>
       <span style={{ width: 12, height: 0, borderTop: `1.5px ${dashed ? "dashed" : "solid"} ${color}`, display: "inline-block" }} />
       {label}
     </span>
+  );
+}
+
+// 클릭하면 켜짐/꺼짐이 토글되는 범례 칩 — "원하는 지표만 보기" 용도
+function ToggleLegendDot({ color, label, dashed, active, onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        display: "flex", alignItems: "center", gap: 6, background: active ? "rgba(255,255,255,0.04)" : "transparent",
+        border: `1px solid ${active ? "#2A2E38" : "transparent"}`, borderRadius: 6,
+        padding: "4px 8px", cursor: "pointer", fontSize: 11.5,
+        color: active ? "#C5C8D1" : "#5D6270",
+      }}
+      title={active ? "클릭하면 숨김" : "클릭하면 표시"}
+    >
+      <span style={{
+        width: 12, height: 0, borderTop: `1.5px ${dashed ? "dashed" : "solid"} ${active ? color : "#3D4250"}`,
+        display: "inline-block",
+      }} />
+      {label}
+    </button>
   );
 }
 
