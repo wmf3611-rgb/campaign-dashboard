@@ -1,10 +1,11 @@
 // ============================================================
-// campaign-dashboard v1.11 (2026-06-25)
+// campaign-dashboard v1.12 (2026-06-25)
 // 변경사항:
 // 1) "마지노선" 용어를 "데이터 기준일"로 전체 변경 (그래프/패널 텍스트 포함).
-// 2) 전체 예산 룰(1번) 차트에 "일별 실제 D7 ROAS" / "일별 실제 D14 ROAS" 라인 추가.
-//    D14는 업로드 파일에 D14 매출 데이터가 전혀 없으면 토글/라인 자체를 노출하지 않음.
-// 3) 차트 상단 범례를 클릭해서 지표(7일 이동평균 / 실제 D7 / 실제 D14)를 on/off 가능하게 함.
+// 2) 전체 예산 룰(1번) 차트에 "일별 실제 D7 ROAS" 라인 추가 + 범례 클릭으로 on/off 토글.
+//    (D14 버전은 검토 후 제외 — 일평균 합산 방식과 헷갈릴 수 있어 보류)
+// 3) 캠페인 배분 룰(2번)의 캠페인별 추이 차트에도 "일별 실제 D7 ROAS" 라인 추가,
+//    7일MA/14일MA/기준선/실제 D7 ROAS 각각 범례 클릭으로 on/off 가능.
 // 4) 기준일 표시용 ReferenceLine 라벨이 차트 가장자리에서 잘리는 문제 수정
 //    (라인의 좌/우 위치에 따라 라벨이 항상 차트 안쪽으로 들어오도록 자동 보정 + 상단 여백 확보).
 // ============================================================
@@ -23,7 +24,7 @@ import {
 // ============================================================
 // 앱 버전 정보 — 업데이트할 때마다 여기 한 곳만 바꾸면 화면에도 자동 반영됨
 // ============================================================
-const APP_VERSION = "v1.11";
+const APP_VERSION = "v1.12";
 const APP_UPDATED_AT = "2026-06-25";
 
 // ============================================================
@@ -478,20 +479,12 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
     const organicByDate = {};
     parsedData.forEach((r) => {
       const bucket = r.campaign ? paidByDate : organicByDate;
-      if (!bucket[r.date]) bucket[r.date] = { cost: 0, rev7: 0, rev14: 0, has14: false };
+      if (!bucket[r.date]) bucket[r.date] = { cost: 0, rev7: 0 };
       bucket[r.date].cost += r.cost;
       bucket[r.date].rev7 += r.rev7;
-      if (r.rev14 != null) {
-        bucket[r.date].rev14 += r.rev14;
-        bucket[r.date].has14 = true;
-      }
     });
 
-    // 업로드 파일 전체에 D14 매출 데이터가 존재하는지 (없으면 D14 관련 항목 자체를 노출하지 않음)
-    const hasAnyD14 = parsedData.some((r) => r.rev14 != null);
-
     const roasSeries = {}; // 일별 실제(raw) D7 블렌디드 ROAS
-    const roasSeries14 = {}; // 일별 실제(raw) D14 블렌디드 ROAS
     dateInfo.allDates.forEach((d) => {
       const paid = paidByDate[d];
       const organicRev = organicByDate[d]?.rev7 || 0;
@@ -499,18 +492,6 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
         roasSeries[d] = (paid.rev7 + organicRev) / paid.cost;
       } else {
         roasSeries[d] = null;
-      }
-
-      if (!hasAnyD14) {
-        roasSeries14[d] = null;
-        return;
-      }
-      const paid14has = paid?.has14 || organicByDate[d]?.has14;
-      if (paid && paid.cost > 0 && paid14has) {
-        const organicRev14 = organicByDate[d]?.rev14 || 0;
-        roasSeries14[d] = (paid.rev14 + organicRev14) / paid.cost;
-      } else {
-        roasSeries14[d] = null;
       }
     });
 
@@ -522,18 +503,17 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
       return wd === 1 || wd === 4;
     });
 
-    // 차트용 시리즈 — 7일 이동평균 / 일별 실제 D7 ROAS / 일별 실제 D14 ROAS(데이터 있을 때만)
-    // 셋 중 하나라도 값이 있는 날짜만 포함 (전부 비어있는 행은 만들지 않음)
+    // 차트용 시리즈 — 7일 이동평균 / 일별 실제 D7 ROAS
+    // 둘 중 하나라도 값이 있는 날짜만 포함 (전부 비어있는 행은 만들지 않음)
     const chartData = dateInfo.allDates
-      .filter((d) => ma7[d] != null || roasSeries[d] != null || roasSeries14[d] != null)
+      .filter((d) => ma7[d] != null || roasSeries[d] != null)
       .map((d) => ({
         date: d.slice(5),
         value: ma7[d],
         roas7: roasSeries[d],
-        roas14: hasAnyD14 ? roasSeries14[d] : null,
       }));
 
-    return { paidByDate, organicByDate, roasSeries, roasSeries14, ma7, decisionPoints, chartData, hasAnyD14 };
+    return { paidByDate, organicByDate, roasSeries, ma7, decisionPoints, chartData };
   }, [parsedData, dateInfo]);
 
   const rule1Result = useMemo(() => {
@@ -610,7 +590,7 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
         ma7: ma7map[markDate7],
         ma14: ma14map[markDate14],
         hasData: ma7map[markDate7] != null,
-        ma7map, ma14map,
+        ma7map, ma14map, roasSeries7,
       };
     });
 
@@ -647,11 +627,12 @@ function DashboardForTitle({ title, onBack, onOpenSettings }) {
         // "예산을 올릴 수 있는 캠페인(상위그룹)"이면서 소진율이 낮을 때만 타겟 조정 신호
         const underSpendFlag = group === "above" && spendRate != null && spendRate < config.underSpendThreshold;
 
-        // 캠페인별 트렌드 차트용 시계열 (날짜, 7일MA, 14일MA, 그날의 기준선)
+        // 캠페인별 트렌드 차트용 시계열 (날짜, 일별 실제 D7 ROAS, 7일MA, 14일MA, 그날의 기준선)
         const chartData = dateInfo.allDates
-          .filter((d) => campaignMa[c].ma7map[d] != null || campaignMa[c].ma14map[d] != null)
+          .filter((d) => campaignMa[c].ma7map[d] != null || campaignMa[c].ma14map[d] != null || campaignMa[c].roasSeries7[d] != null)
           .map((d) => ({
             date: d.slice(5),
+            roas7: campaignMa[c].roasSeries7[d],
             ma7: campaignMa[c].ma7map[d],
             ma14: campaignMa[c].ma14map[d],
             benchmark: paidTotalMa7[d],
@@ -1291,7 +1272,7 @@ function BudgetInputPanel({ campaignList, campaignBudgets, setCampaignBudgets, c
 function Rule1Panel({ rule1Result, rule1Budget, currentTotalBudget, blendedAnalysis, decisionDate, markDate7, config }) {
   const [open, setOpen] = useState(true);
   // 차트에 표시할 지표 on/off 상태 (범례 클릭으로 토글)
-  const [visible, setVisible] = useState({ ma7: true, roas7: true, roas14: true });
+  const [visible, setVisible] = useState({ ma7: true, roas7: true });
   const toggle = (key) => setVisible((v) => ({ ...v, [key]: !v[key] }));
 
   if (!rule1Result) return null;
@@ -1305,7 +1286,6 @@ function Rule1Panel({ rule1Result, rule1Budget, currentTotalBudget, blendedAnaly
   }
 
   const { currentMa, zone, finalRate } = rule1Result;
-  const hasD14 = !!blendedAnalysis?.hasAnyD14;
   const markLabel = markDate7 ? markDate7.slice(5) : null;
   const markInRange = markLabel && blendedAnalysis?.chartData?.some((d) => d.date === markLabel);
   const refLinePosition = markInRange ? getRefLineLabelPosition(blendedAnalysis.chartData, markLabel) : "insideTopLeft";
@@ -1342,9 +1322,6 @@ function Rule1Panel({ rule1Result, rule1Budget, currentTotalBudget, blendedAnaly
             <span style={{ marginRight: 4 }}>Blended ROAS 추이 — 지표 클릭으로 표시/숨김</span>
             <ToggleLegendDot color="#5B8DEF" label="7일 이동평균 ROAS" active={visible.ma7} onClick={() => toggle("ma7")} />
             <ToggleLegendDot color="#3DBE8B" label="일별 실제 D7 ROAS" dashed active={visible.roas7} onClick={() => toggle("roas7")} />
-            {hasD14 && (
-              <ToggleLegendDot color="#E5894A" label="일별 실제 D14 ROAS" dashed active={visible.roas14} onClick={() => toggle("roas14")} />
-            )}
             <span style={{ display: "flex", alignItems: "center", gap: 5, color: "#9499A6", marginLeft: 4 }}>
               <span style={{ width: 14, height: 0, borderTop: "1.5px dashed #C9622B", display: "inline-block" }} />
               데이터 기준일 {markDate7}
@@ -1376,7 +1353,6 @@ function Rule1Panel({ rule1Result, rule1Budget, currentTotalBudget, blendedAnaly
                   />
                 )}
                 {visible.roas7 && <Line type="monotone" dataKey="roas7" name="일별 실제 D7 ROAS" stroke="#3DBE8B" strokeWidth={1.3} strokeDasharray="4 3" dot={false} connectNulls />}
-                {hasD14 && visible.roas14 && <Line type="monotone" dataKey="roas14" name="일별 실제 D14 ROAS" stroke="#E5894A" strokeWidth={1.3} strokeDasharray="4 3" dot={false} connectNulls />}
                 {visible.ma7 && <Line type="monotone" dataKey="value" name="7일 이동평균 ROAS" stroke="#5B8DEF" strokeWidth={2.2} dot={false} connectNulls />}
               </LineChart>
             </ResponsiveContainer>
@@ -1501,6 +1477,10 @@ function Rule2Panel({ campaignAnalysis, rule2Allocation, rule1Result, config, ma
 
 // 캠페인명 클릭 시 펼쳐지는 D7/D14 ROAS 추이 차트
 function CampaignTrendChart({ campaign, config, markDate7 }) {
+  // 차트에 표시할 지표 on/off 상태 (범례 클릭으로 토글) — 캠페인마다 독립적으로 유지됨
+  const [visible, setVisible] = useState({ ma7: true, ma14: true, roas7: true, benchmark: true });
+  const toggle = (key) => setVisible((v) => ({ ...v, [key]: !v[key] }));
+
   if (!campaign.chartData || campaign.chartData.length < 2) {
     return <EmptyNote text="추이를 그릴 데이터가 충분하지 않습니다 (최소 며칠치 이동평균 데이터 필요)." />;
   }
@@ -1510,11 +1490,14 @@ function CampaignTrendChart({ campaign, config, markDate7 }) {
   const refLinePosition = markInRange ? getRefLineLabelPosition(campaign.chartData, markLabel) : "insideTopLeft";
   return (
     <div style={{ padding: "10px 0 0 0" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 10, fontSize: 11.5, flexWrap: "wrap" }}>
-        <span style={{ color: "#C5C8D1", fontWeight: 600 }}>{campaign.name}</span>
-        <LegendDot color="#5B8DEF" label="7일 이동평균 ROAS" />
-        {hasD14 && <LegendDot color="#E5894A" label="14일 이동평균 ROAS" dashed />}
-        <LegendDot color="#5D6270" label="유료 전체 평균(기준선)" dashed />
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, fontSize: 11.5, flexWrap: "wrap" }}>
+        <span style={{ color: "#C5C8D1", fontWeight: 600, marginRight: 6 }}>{campaign.name}</span>
+        <ToggleLegendDot color="#5B8DEF" label="7일 이동평균 ROAS" active={visible.ma7} onClick={() => toggle("ma7")} />
+        <ToggleLegendDot color="#3DBE8B" label="일별 실제 D7 ROAS" dashed active={visible.roas7} onClick={() => toggle("roas7")} />
+        {hasD14 && (
+          <ToggleLegendDot color="#E5894A" label="14일 이동평균 ROAS" dashed active={visible.ma14} onClick={() => toggle("ma14")} />
+        )}
+        <ToggleLegendDot color="#5D6270" label="유료 전체 평균(기준선)" dashed active={visible.benchmark} onClick={() => toggle("benchmark")} />
         {markInRange && <LegendDot color="#C9622B" label={`데이터 기준일 ${markDate7}`} dashed />}
       </div>
       <div style={{ height: 200 }}>
@@ -1541,9 +1524,10 @@ function CampaignTrendChart({ campaign, config, markDate7 }) {
                 label={{ value: "기준일", position: refLinePosition, fill: "#C9622B", fontSize: 10 }}
               />
             )}
-            <Line type="monotone" dataKey="benchmark" name="기준선" stroke="#5D6270" strokeWidth={1.3} strokeDasharray="4 3" dot={false} />
-            {hasD14 && <Line type="monotone" dataKey="ma14" name="14일MA" stroke="#E5894A" strokeWidth={1.6} strokeDasharray="4 3" dot={false} connectNulls />}
-            <Line type="monotone" dataKey="ma7" name="7일MA" stroke="#5B8DEF" strokeWidth={2.2} dot={false} connectNulls />
+            {visible.benchmark && <Line type="monotone" dataKey="benchmark" name="기준선" stroke="#5D6270" strokeWidth={1.3} strokeDasharray="4 3" dot={false} connectNulls />}
+            {visible.roas7 && <Line type="monotone" dataKey="roas7" name="일별 실제 D7 ROAS" stroke="#3DBE8B" strokeWidth={1.3} strokeDasharray="4 3" dot={false} connectNulls />}
+            {hasD14 && visible.ma14 && <Line type="monotone" dataKey="ma14" name="14일MA" stroke="#E5894A" strokeWidth={1.6} strokeDasharray="4 3" dot={false} connectNulls />}
+            {visible.ma7 && <Line type="monotone" dataKey="ma7" name="7일MA" stroke="#5B8DEF" strokeWidth={2.2} dot={false} connectNulls />}
           </LineChart>
         </ResponsiveContainer>
       </div>
